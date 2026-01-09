@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # ⚠️ CRITICAL SYSTEM CONSTRAINTS
 
+## Restricted Files - DO NOT READ
+**NEVER read or use the contents of these files. They are for user reference only:**
+- `Step-by-Step.docx` - User's personal documentation
+
+
+
 ## Large Dataset Warning
 The dataset at `data/analysis/final_analysis_dataset.csv` is **2.6 GB** (verified 2026-01-09).
 
