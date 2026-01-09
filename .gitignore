@@ -7,9 +7,18 @@ data/**/*
 !data/.gitkeep
 !data/**/.gitkeep
 
-# Large result files (keep structure, ignore large outputs)
-outputs/*.rds
-outputs/checkpoints/
+# Outputs - store separately (Google Drive, etc.)
+outputs/*
+!outputs/.gitkeep
+!outputs/figures/
+!outputs/checkpoints/
+!outputs/tables/
+outputs/figures/*
+outputs/checkpoints/*
+outputs/tables/*
+!outputs/figures/.gitkeep
+!outputs/checkpoints/.gitkeep
+!outputs/tables/.gitkeep
 
 # =============================================================================
 # R / RStudio
