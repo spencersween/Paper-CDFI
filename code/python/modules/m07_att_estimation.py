@@ -100,22 +100,21 @@ def compute_att_gt(
     # Residuals
     residual = delta_y - mu_0
 
-    # Weights
-    w1 = D / p_g
-    w0 = (1 - D) * ps / ((1 - ps) * p_g)
+    # Doubly-robust ATT following CS2021:
+    # ATT = E[ w * (ΔY - μ₀) ]
+    # where w = (D - ps) / (p_g * (1 - ps))
+    #
+    # For treated (D=1): w = (1-ps) / (p_g*(1-ps)) = 1/p_g
+    # For control (D=0): w = -ps / (p_g*(1-ps))
 
-    # Normalize control weights
-    if n_control > 0:
-        w0_sum = w0.sum()
-        if w0_sum > 0:
-            w0 = w0 * n_control / w0_sum
+    w = (D - ps) / (p_g * (1 - ps))
 
     # ATT estimate (doubly-robust)
-    att = (w1 * residual).mean() - (w0 * residual).mean()
+    att = np.mean(w * residual)
 
-    # Influence function for in-sample units
-    # IF = (D/p_g) * (residual - ATT) - ((1-D) * ps / ((1-ps) * p_g)) * residual
-    inf_func_in_sample = (D / p_g) * (residual - att) - ((1 - D) * ps / ((1 - ps) * p_g)) * residual
+    # Influence function for CS2021 doubly-robust estimator:
+    # IF_i = w_i * (ΔY_i - μ₀(X_i) - ATT)
+    inf_func_in_sample = w * (residual - att)
 
     # Expand to unit level (zeros for out-of-sample units)
     inf_func = np.zeros(n_units)

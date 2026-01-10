@@ -171,26 +171,66 @@ def add_bootstrap_inference(att_results: ATTResults, config: Config) -> ATTResul
 
 
 def test_parallel_trends(att_results: ATTResults, config: Config) -> Dict:
-    """Test whether pre-treatment ATT estimates are jointly zero."""
+    """
+    Test whether pre-treatment ATT estimates are jointly zero.
+
+    Uses proper IF aggregation and clustered bootstrap following CS2021.
+    """
     log_message("Testing parallel trends...")
 
     att_df = att_results.att_df
-    boot_dist = att_results.bootstrap_results['bootstrap_dist']
+    influence_functions = att_results.influence_functions
+    unit_data = att_results.unit_data
+
+    n_units = unit_data.n_units
+    n_bootstrap = config.inference.n_bootstrap
 
     # Pre-treatment indices
     pre_mask = att_df['is_pre'].values
+    idx_positions = np.where(pre_mask)[0]
     n_pre = pre_mask.sum()
 
     if n_pre == 0:
         log_message("  No pre-treatment periods found")
         return {'test_stat': np.nan, 'p_value': np.nan, 'n_pre': 0}
 
-    att_pre = att_df.loc[pre_mask, 'att'].values
-    boot_pre = boot_dist[pre_mask, :]
+    # Equal weights for pre-treatment periods
+    weights = np.ones(n_pre) / n_pre
 
     # Mean pre-treatment ATT
+    att_pre = att_df.loc[pre_mask, 'att'].values
     mean_att_pre = np.nanmean(att_pre)
-    se_mean_pre = np.nanstd(np.nanmean(boot_pre, axis=0))
+
+    # Aggregate influence functions
+    agg_if = np.zeros(n_units)
+    for w, idx in zip(weights, idx_positions):
+        if idx < len(influence_functions):
+            agg_if += w * influence_functions[idx]
+
+    # Cluster info for bootstrap
+    clusters = unit_data.clusters
+    unique_clusters = np.unique(clusters)
+    n_clusters = len(unique_clusters)
+    cluster_map = {c: i for i, c in enumerate(unique_clusters)}
+    cluster_indices = np.array([cluster_map[c] for c in clusters], dtype=np.int64)
+
+    # Aggregate by cluster
+    cluster_inf = np.zeros(n_clusters)
+    for c in range(n_clusters):
+        cluster_mask = cluster_indices == c
+        cluster_inf[c] = np.nansum(agg_if[cluster_mask])
+
+    # Generate multiplier weights
+    np.random.seed(config.inference.seed + 4)  # Different seed
+    if config.inference.multiplier_dist == "normal":
+        xi = np.random.randn(n_clusters, n_bootstrap)
+    else:
+        xi = np.random.choice([-1, 1], size=(n_clusters, n_bootstrap))
+
+    # Bootstrap
+    boot_mean_pre = np.array([mean_att_pre + np.sum(xi[:, b] * cluster_inf) / n_units
+                             for b in range(n_bootstrap)])
+    se_mean_pre = np.nanstd(boot_mean_pre)
 
     if se_mean_pre == 0:
         test_stat = np.nan
@@ -214,12 +254,21 @@ def test_parallel_trends(att_results: ATTResults, config: Config) -> Dict:
 
 
 def compute_simple_att(att_results: ATTResults, config: Config) -> Dict:
-    """Compute simple ATT (weighted average post-treatment effect)."""
+    """
+    Compute simple ATT (weighted average post-treatment effect).
+
+    Uses proper IF aggregation and clustered bootstrap following CS2021.
+    """
     att_df = att_results.att_df
-    boot_dist = att_results.bootstrap_results['bootstrap_dist']
+    influence_functions = att_results.influence_functions
+    unit_data = att_results.unit_data
+
+    n_units = unit_data.n_units
+    n_bootstrap = config.inference.n_bootstrap
 
     # Post-treatment indices
     post_mask = ~att_df['is_pre'].values
+    idx_positions = np.where(post_mask)[0]
 
     if not post_mask.any():
         return {'att': np.nan, 'se': np.nan}
@@ -231,8 +280,35 @@ def compute_simple_att(att_results: ATTResults, config: Config) -> Dict:
     # Weighted average ATT
     att_simple = np.nansum(weights * att_df.loc[post_mask, 'att'].values)
 
-    # Bootstrap SE
-    boot_simple = np.nansum(weights[:, np.newaxis] * boot_dist[post_mask, :], axis=0)
+    # Aggregate influence functions
+    agg_if = np.zeros(n_units)
+    for w, idx in zip(weights, idx_positions):
+        if idx < len(influence_functions):
+            agg_if += w * influence_functions[idx]
+
+    # Cluster info for bootstrap
+    clusters = unit_data.clusters
+    unique_clusters = np.unique(clusters)
+    n_clusters = len(unique_clusters)
+    cluster_map = {c: i for i, c in enumerate(unique_clusters)}
+    cluster_indices = np.array([cluster_map[c] for c in clusters], dtype=np.int64)
+
+    # Aggregate by cluster
+    cluster_inf = np.zeros(n_clusters)
+    for c in range(n_clusters):
+        cluster_mask = cluster_indices == c
+        cluster_inf[c] = np.nansum(agg_if[cluster_mask])
+
+    # Generate multiplier weights
+    np.random.seed(config.inference.seed + 3)  # Different seed
+    if config.inference.multiplier_dist == "normal":
+        xi = np.random.randn(n_clusters, n_bootstrap)
+    else:
+        xi = np.random.choice([-1, 1], size=(n_clusters, n_bootstrap))
+
+    # Bootstrap
+    boot_simple = np.array([att_simple + np.sum(xi[:, b] * cluster_inf) / n_units
+                           for b in range(n_bootstrap)])
     se_simple = np.nanstd(boot_simple)
 
     alpha = config.inference.alpha
