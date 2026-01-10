@@ -23,6 +23,7 @@ library(torch)
 library(ggplot2)
 
 # Source all modules
+cat("Loading modules...\n")
 source("code/r/R/00_config.R")
 source("code/r/R/utils.R")
 source("code/r/R/01_data_loader.R")
@@ -41,7 +42,26 @@ cat("Setup complete.\n")
 # =============================================================================
 # CELL 2: CONFIGURATION
 # =============================================================================
-# Modify these settings based on your needs
+# Set QUICK_TEST = TRUE for fast testing with minimal settings
+# Set QUICK_TEST = FALSE for full estimation
+
+QUICK_TEST <- TRUE  # <-- CHANGE THIS FOR FULL RUN
+
+if (QUICK_TEST) {
+  cat("\n*** QUICK TEST MODE - using minimal settings ***\n\n")
+  sample_n <- 10000        # Small sample
+  n_folds <- 2L            # Minimum folds
+  n_bootstrap <- 100L      # Fewer bootstrap reps
+  epochs <- 5L             # Few epochs
+  batch_size <- 512L       # Reasonable batch
+} else {
+  cat("\n*** FULL ESTIMATION MODE ***\n\n")
+  sample_n <- NULL         # Full data
+  n_folds <- 2L            # 2-fold cross-fitting
+  n_bootstrap <- 1000L     # Full bootstrap
+  epochs <- 100L           # Full training
+  batch_size <- 512L       # Batch size
+}
 
 config <- create_config(
 
@@ -54,26 +74,26 @@ config <- create_config(
   # NEURAL NETWORK ARCHITECTURE
   # =========================================================================
   architecture = list(
-    input_projection_dim = 4,         # Dimension after per-(g,t) input projection
-    shared_layers = c(4),       # Shared encoder layers
-    outcome_head_layers = c(4),   # Outcome regression head layers
-    propensity_head_layers = c(4),# Propensity score head layers
-    activation = "relu",                  # "relu", "leaky_relu", "elu", "gelu"
-    dropout = 0.0,                        # Dropout rate [0, 1)
-    layer_norm = FALSE,                    # Use LayerNorm (better for variable inputs)
-    residual_connections = FALSE          # Skip connections
+    input_projection_dim = if (QUICK_TEST) 16L else 128L,
+    shared_layers = if (QUICK_TEST) c(32L) else c(256L, 128L),
+    outcome_head_layers = if (QUICK_TEST) c(16L) else c(64L),
+    propensity_head_layers = if (QUICK_TEST) c(16L) else c(64L),
+    activation = "relu",
+    dropout = 0.2,
+    layer_norm = TRUE,
+    residual_connections = FALSE
   ),
 
   # =========================================================================
   # OPTIMIZER
   # =========================================================================
-  optimizer = "adamw",  # "adamw" or "lbfgs"
+  optimizer = "adamw",
   optimizer_params = list(
     adamw = list(
-      lr = 0.001,                         # Learning rate
-      weight_decay = 0.01,                # L2 regularization
-      betas = c(0.9, 0.999),              # Adam betas
-      eps = 1e-8                          # Numerical stability
+      lr = 0.001,
+      weight_decay = 0.01,
+      betas = c(0.9, 0.999),
+      eps = 1e-8
     ),
     lbfgs = list(
       lr = 1.0,
@@ -87,36 +107,36 @@ config <- create_config(
   # LEARNING RATE SCHEDULER
   # =========================================================================
   scheduler = list(
-    type = "none",                      # "none", "step", "cosine", "reduce_on_plateau"
-    T_max = 100L,                         # Cosine: period length
-    eta_min = 1e-6,                       # Cosine: minimum LR
-    step_size = 30L,                      # Step: epochs between decay
-    gamma = 0.1,                          # Step: decay factor
-    patience = 10L,                       # Plateau: epochs before decay
-    factor = 0.5,                         # Plateau: decay factor
-    min_lr = 1e-6                         # Plateau: minimum LR
+    type = "cosine",
+    T_max = epochs,
+    eta_min = 1e-6,
+    step_size = 30L,
+    gamma = 0.1,
+    patience = 10L,
+    factor = 0.5,
+    min_lr = 1e-6
   ),
 
   # =========================================================================
   # TRAINING
   # =========================================================================
   training = list(
-    epochs = 10L,                        # Maximum epochs
-    batch_size = 1000000L,                    # Batch size
-    validation_split = 0.1,               # Internal validation split
-    shuffle = TRUE,                       # Shuffle training data
+    epochs = epochs,
+    batch_size = batch_size,
+    validation_split = 0.1,
+    shuffle = TRUE,
 
     early_stopping = list(
       enabled = TRUE,
-      patience = 15L,                     # Epochs to wait for improvement
-      min_delta = 1e-4,                   # Minimum improvement threshold
-      monitor = "val_loss",               # Metric to monitor
-      restore_best_weights = TRUE         # Restore best model at end
+      patience = if (QUICK_TEST) 3L else 15L,
+      min_delta = 1e-4,
+      monitor = "val_loss",
+      restore_best_weights = TRUE
     ),
 
     gradient_clipping = list(
       enabled = TRUE,
-      max_norm = 1.0                      # Max gradient norm
+      max_norm = 1.0
     )
   ),
 
@@ -124,79 +144,84 @@ config <- create_config(
   # LOSS FUNCTION
   # =========================================================================
   loss = list(
-    outcome_weight = 1.0,                 # Weight for outcome regression loss
-    propensity_weight = 1.0,              # Weight for propensity score loss
-    l1_penalty = 0.0,                     # Additional L1 regularization
-    l2_penalty = 0.0                      # Additional L2 regularization
+    outcome_weight = 1.0,
+    propensity_weight = 1.0,
+    l1_penalty = 0.0,
+    l2_penalty = 0.0
   ),
 
   # =========================================================================
   # CROSS-FITTING (DML)
   # =========================================================================
   cross_fitting = list(
-    n_folds = 2L,                         # K for K-fold (2 is fastest, 5 is standard)
-    stratify_by = "cluster_county",       # Split along cluster variable
-    seed = 42L                            # Reproducibility
+    n_folds = n_folds,
+    stratify_by = "cluster_county",
+    seed = 42L
   ),
 
   # =========================================================================
   # PROPENSITY SCORE
   # =========================================================================
   propensity = list(
-    min_ps = 0.001,                       # Lower clamp for propensity scores
-    max_ps = 0.999,                       # Upper clamp for propensity scores
-    trim = FALSE,                         # Drop extreme propensity observations
-    trim_threshold = 0.01                 # Trimming threshold
+    min_ps = 0.001,
+    max_ps = 0.999,
+    trim = FALSE,
+    trim_threshold = 0.01
   ),
 
   # =========================================================================
   # INFERENCE
   # =========================================================================
   inference = list(
-    n_bootstrap = 1000L,                  # Bootstrap replications
-    alpha = 0.05,                         # Significance level (95% CI)
-    uniform_bands = TRUE,                 # Compute uniform confidence bands
-    pointwise_ci = TRUE,                  # Compute pointwise CIs
-    multiplier_dist = "normal",           # "normal" or "rademacher"
-    seed = 123L                           # Bootstrap seed
+    n_bootstrap = n_bootstrap,
+    alpha = 0.05,
+    uniform_bands = TRUE,
+    pointwise_ci = TRUE,
+    multiplier_dist = "normal",
+    seed = 123L
   ),
 
   # =========================================================================
   # EVENT STUDY
   # =========================================================================
   event_study = list(
-    pre_periods = 10L,                    # Periods before treatment
-    post_periods = 10L,                   # Periods after treatment
-    reference_period = -1L,               # Reference period for normalization
-    weight_by_group_size = TRUE,          # Weight by number of treated units
-    drop_first_period = TRUE,             # Drop first event time
-    drop_last_period = TRUE               # Drop last event time
+    pre_periods = 10L,
+    post_periods = 10L,
+    reference_period = -1L,
+    weight_by_group_size = TRUE,
+    drop_first_period = TRUE,
+    drop_last_period = TRUE
   ),
 
   # =========================================================================
   # MONITORING & OUTPUT
   # =========================================================================
   monitoring = list(
-    verbose = TRUE,                       # Print progress
-    print_every = 10L,                    # Print every N epochs
-    plot_loss = TRUE,                     # Plot loss curves
-    save_checkpoints = FALSE,             # Save model checkpoints
-    checkpoint_dir = "checkpoints",       # Checkpoint directory
-    checkpoint_every = 10L,               # Save every N epochs
-    log_file = NULL,                      # Log file path (NULL = no file)
-    log_level = "INFO"                    # "DEBUG", "INFO", "WARNING", "ERROR"
+    verbose = TRUE,
+    print_every = if (QUICK_TEST) 1L else 10L,
+    plot_loss = TRUE,
+    save_checkpoints = FALSE,
+    checkpoint_dir = "checkpoints",
+    checkpoint_every = 10L,
+    log_file = NULL,
+    log_level = "INFO"
   ),
 
   # =========================================================================
   # COMPUTATIONAL
   # =========================================================================
-  device = "cpu",                        # "cpu", "cuda", "mps", or "auto"
-  seed = 42L,                             # Global random seed
-  gc_every = 10L                          # Garbage collection frequency
+  device = "cpu",
+  seed = 42L,
+  gc_every = 10L
 )
 
-# Print configuration
-print(config)
+# Print key settings
+cat(sprintf("Configuration:\n"))
+cat(sprintf("  Sample size: %s\n", if (is.null(sample_n)) "FULL" else format(sample_n, big.mark = ",")))
+cat(sprintf("  Cross-fitting folds: %d\n", n_folds))
+cat(sprintf("  Bootstrap replications: %d\n", n_bootstrap))
+cat(sprintf("  Max epochs: %d\n", epochs))
+cat(sprintf("  Batch size: %d\n", batch_size))
 
 # Set random seed
 set_seed(config$seed)
@@ -207,10 +232,12 @@ set_seed(config$seed)
 
 data_path <- file.path(project_root, "data/analysis/final_analysis_dataset.csv")
 
-# Load data (set sample_n for testing, NULL for full data)
-sample_n <- 50000  # Set to e.g. 50000 for testing, NULL for full dataset
+# Check file exists
+if (!file.exists(data_path)) {
+  stop(sprintf("Data file not found: %s\nPlease download from Google Drive.", data_path))
+}
 
-cat("Loading data...\n")
+cat("\nLoading data...\n")
 t1 <- Sys.time()
 
 panel <- load_panel_data(data_path, config, sample_n = sample_n)
@@ -227,7 +254,7 @@ summarize_data(data, metadata, config)
 # CELL 4: SETUP (g,t) PAIRS AND COVARIATES
 # =============================================================================
 
-cat("Setting up (g,t) pairs and covariates...\n")
+cat("\nSetting up (g,t) pairs and covariates...\n")
 t1 <- Sys.time()
 
 # Get valid (g,t) pairs
@@ -258,19 +285,26 @@ cat(sprintf("  Covariates: %d (dims per (g,t): %d-%d)\n",
 # =============================================================================
 # This is the computationally intensive step
 
-cat("\n" , rep("=", 60), "\n")
+cat("\n", rep("=", 60), "\n")
 cat("CROSS-FITTING\n")
 cat(rep("=", 60), "\n\n")
 
 t1 <- Sys.time()
 
-cf_results <- run_cross_fitting(
-  data,
-  gt_pairs,
-  covariate_info$all_covariates,
-  covariate_masks,
-  config
-)
+cf_results <- tryCatch({
+  run_cross_fitting(
+    data,
+    gt_pairs,
+    covariate_info$all_covariates,
+    covariate_masks,
+    config
+  )
+}, error = function(e) {
+  cat(sprintf("\nERROR in cross-fitting: %s\n", e$message))
+  cat("Stack trace:\n")
+  print(sys.calls())
+  stop(e)
+})
 
 t2 <- Sys.time()
 training_time <- as.numeric(difftime(t2, t1, units = "secs"))
@@ -355,7 +389,11 @@ print_aggregation_summary(agg_results)
 
 # View event study table
 cat("\n--- Event Study Estimates ---\n")
-print(agg_results$event_study$event_study[, .(event_time, att, se, ci_lower, ci_upper, uniform_lower, uniform_upper)])
+es_cols <- c("event_time", "att", "se", "ci_lower", "ci_upper")
+if ("uniform_lower" %in% names(agg_results$event_study$event_study)) {
+  es_cols <- c(es_cols, "uniform_lower", "uniform_upper")
+}
+print(agg_results$event_study$event_study[, ..es_cols])
 
 # =============================================================================
 # CELL 9: VISUALIZATION
@@ -370,30 +408,37 @@ output_dir <- file.path(project_root, "outputs/figures")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Generate event study plot
-es_plot <- plot_event_study(
-  agg_results$event_study,
-  title = "Effect of CDFI Lending on Startup Formation Rate",
-  subtitle = "Callaway & Sant'Anna (2021) DiD with Neural Network Nuisance Estimation",
-  show_uniform_bands = TRUE,
-  show_pointwise_ci = TRUE
-)
+es_plot <- tryCatch({
+  plot_event_study(
+    agg_results$event_study,
+    title = "Effect of CDFI Lending on Startup Formation Rate",
+    subtitle = "Callaway & Sant'Anna (2021) DiD with Neural Network Nuisance Estimation",
+    show_uniform_bands = TRUE,
+    show_pointwise_ci = TRUE
+  )
+}, error = function(e) {
+  cat(sprintf("Warning: Could not create plot: %s\n", e$message))
+  NULL
+})
 
-# Display plot
-print(es_plot)
+if (!is.null(es_plot)) {
+  # Display plot
+  print(es_plot)
 
-# Save plot
-ggsave(
-  file.path(output_dir, "event_study.png"),
-  es_plot,
-  width = 10, height = 6, dpi = 300
-)
-ggsave(
-  file.path(output_dir, "event_study.pdf"),
-  es_plot,
-  width = 10, height = 6
-)
+  # Save plot
+  ggsave(
+    file.path(output_dir, "event_study.png"),
+    es_plot,
+    width = 10, height = 6, dpi = 300
+  )
+  ggsave(
+    file.path(output_dir, "event_study.pdf"),
+    es_plot,
+    width = 10, height = 6
+  )
 
-cat(sprintf("Plots saved to: %s\n", output_dir))
+  cat(sprintf("Plots saved to: %s\n", output_dir))
+}
 
 # =============================================================================
 # CELL 10: SAVE RESULTS
@@ -453,3 +498,7 @@ cat("\n")
 cat(sprintf("Training time: %.1f minutes\n", training_time/60))
 cat(sprintf("Figures saved to: %s\n", output_dir))
 cat(sprintf("Results saved to: %s\n", output_path))
+
+if (QUICK_TEST) {
+  cat("\n*** This was a QUICK TEST run. Set QUICK_TEST = FALSE for full estimation. ***\n")
+}
