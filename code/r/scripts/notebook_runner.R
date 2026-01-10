@@ -45,83 +45,154 @@ cat("Setup complete.\n")
 
 config <- create_config(
 
-  # Outcome variable (without y_ prefix)
-  outcome = "sfr_pc",
+  # =========================================================================
+  # OUTCOME VARIABLE
+  # =========================================================================
+  outcome = "sfr_pc",  # Without y_ prefix
 
-  # Neural network architecture
+  # =========================================================================
+  # NEURAL NETWORK ARCHITECTURE
+  # =========================================================================
   architecture = list(
-    input_projection_dim = 128L,        # Dimension after input projection
-    shared_layers = c(256L, 128L),      # Shared encoder layers
-    outcome_head_layers = c(64L),       # Outcome regression head
-    propensity_head_layers = c(64L),    # Propensity score head
-    activation = "relu",                 # Activation function
-    dropout = 0.1,                       # Dropout rate
-    layer_norm = TRUE,                   # Use layer normalization
-    residual_connections = FALSE
+    input_projection_dim = 128L,         # Dimension after per-(g,t) input projection
+    shared_layers = c(256L, 128L),       # Shared encoder layers
+    outcome_head_layers = c(64L, 32L),   # Outcome regression head layers
+    propensity_head_layers = c(64L, 32L),# Propensity score head layers
+    activation = "relu",                  # "relu", "leaky_relu", "elu", "gelu"
+    dropout = 0.2,                        # Dropout rate [0, 1)
+    layer_norm = TRUE,                    # Use LayerNorm (better for variable inputs)
+    residual_connections = FALSE          # Skip connections
   ),
 
-  # Training settings
-  training = list(
-    epochs = 100L,                       # Max epochs
-    batch_size = 256L,                   # Batch size
-    validation_split = 0.2,              # Internal validation split
-    shuffle = TRUE,
-    early_stopping = list(
-      enabled = TRUE,
-      patience = 15L,                    # Epochs to wait
-      min_delta = 1e-4,
-      monitor = "val_loss",
-      restore_best_weights = TRUE
-    ),
-    gradient_clipping = list(
-      enabled = TRUE,
-      max_norm = 1.0
-    )
-  ),
-
-  # Optimizer settings
-  optimizer = "adamw",
+  # =========================================================================
+  # OPTIMIZER
+  # =========================================================================
+  optimizer = "adamw",  # "adamw" or "lbfgs"
   optimizer_params = list(
     adamw = list(
-      lr = 0.001,                        # Learning rate
-      weight_decay = 0.01,
-      betas = c(0.9, 0.999),
-      eps = 1e-8
+      lr = 0.001,                         # Learning rate
+      weight_decay = 0.01,                # L2 regularization
+      betas = c(0.9, 0.999),              # Adam betas
+      eps = 1e-8                          # Numerical stability
+    ),
+    lbfgs = list(
+      lr = 1.0,
+      max_iter = 20L,
+      history_size = 100L,
+      line_search_fn = "strong_wolfe"
     )
   ),
 
-  # Cross-fitting
+  # =========================================================================
+  # LEARNING RATE SCHEDULER
+  # =========================================================================
+  scheduler = list(
+    type = "cosine",                      # "none", "step", "cosine", "reduce_on_plateau"
+    T_max = 100L,                         # Cosine: period length
+    eta_min = 1e-6,                       # Cosine: minimum LR
+    step_size = 30L,                      # Step: epochs between decay
+    gamma = 0.1,                          # Step: decay factor
+    patience = 10L,                       # Plateau: epochs before decay
+    factor = 0.5,                         # Plateau: decay factor
+    min_lr = 1e-6                         # Plateau: minimum LR
+  ),
+
+  # =========================================================================
+  # TRAINING
+  # =========================================================================
+  training = list(
+    epochs = 100L,                        # Maximum epochs
+    batch_size = 512L,                    # Batch size
+    validation_split = 0.2,               # Internal validation split
+    shuffle = TRUE,                       # Shuffle training data
+
+    early_stopping = list(
+      enabled = TRUE,
+      patience = 15L,                     # Epochs to wait for improvement
+      min_delta = 1e-4,                   # Minimum improvement threshold
+      monitor = "val_loss",               # Metric to monitor
+      restore_best_weights = TRUE         # Restore best model at end
+    ),
+
+    gradient_clipping = list(
+      enabled = TRUE,
+      max_norm = 1.0                      # Max gradient norm
+    )
+  ),
+
+  # =========================================================================
+  # LOSS FUNCTION
+  # =========================================================================
+  loss = list(
+    outcome_weight = 1.0,                 # Weight for outcome regression loss
+    propensity_weight = 1.0,              # Weight for propensity score loss
+    l1_penalty = 0.0,                     # Additional L1 regularization
+    l2_penalty = 0.0                      # Additional L2 regularization
+  ),
+
+  # =========================================================================
+  # CROSS-FITTING (DML)
+  # =========================================================================
   cross_fitting = list(
-    n_folds = 2L,                        # K for K-fold (2 is faster)
-    stratify_by = "cluster_county",
-    seed = 42L
+    n_folds = 2L,                         # K for K-fold (2 is fastest, 5 is standard)
+    stratify_by = "cluster_county",       # Split along cluster variable
+    seed = 42L                            # Reproducibility
   ),
 
-  # Inference settings
+  # =========================================================================
+  # PROPENSITY SCORE
+  # =========================================================================
+  propensity = list(
+    min_ps = 0.001,                       # Lower clamp for propensity scores
+    max_ps = 0.999,                       # Upper clamp for propensity scores
+    trim = FALSE,                         # Drop extreme propensity observations
+    trim_threshold = 0.01                 # Trimming threshold
+  ),
+
+  # =========================================================================
+  # INFERENCE
+  # =========================================================================
   inference = list(
-    n_bootstrap = 1000L,                 # Bootstrap replications
-    alpha = 0.05,                        # Significance level
-    multiplier_dist = "normal",
-    uniform_bands = TRUE,
-    seed = 123L
+    n_bootstrap = 1000L,                  # Bootstrap replications
+    alpha = 0.05,                         # Significance level (95% CI)
+    uniform_bands = TRUE,                 # Compute uniform confidence bands
+    pointwise_ci = TRUE,                  # Compute pointwise CIs
+    multiplier_dist = "normal",           # "normal" or "rademacher"
+    seed = 123L                           # Bootstrap seed
   ),
 
-  # Event study window
+  # =========================================================================
+  # EVENT STUDY
+  # =========================================================================
   event_study = list(
-    pre_periods = 10L,
-    post_periods = 10L,
-    reference_period = -1L,
-    weight_by_group_size = TRUE
+    pre_periods = 10L,                    # Periods before treatment
+    post_periods = 10L,                   # Periods after treatment
+    reference_period = -1L,               # Reference period for normalization
+    weight_by_group_size = TRUE,          # Weight by number of treated units
+    drop_first_period = TRUE,             # Drop first event time
+    drop_last_period = TRUE               # Drop last event time
   ),
 
-  # Monitoring
+  # =========================================================================
+  # MONITORING & OUTPUT
+  # =========================================================================
   monitoring = list(
-    verbose = TRUE,
-    print_every = 5L,                    # Print every N epochs
-    plot_loss = FALSE,
-    save_checkpoints = FALSE,
-    log_level = "INFO"
-  )
+    verbose = TRUE,                       # Print progress
+    print_every = 10L,                    # Print every N epochs
+    plot_loss = TRUE,                     # Plot loss curves
+    save_checkpoints = FALSE,             # Save model checkpoints
+    checkpoint_dir = "checkpoints",       # Checkpoint directory
+    checkpoint_every = 10L,               # Save every N epochs
+    log_file = NULL,                      # Log file path (NULL = no file)
+    log_level = "INFO"                    # "DEBUG", "INFO", "WARNING", "ERROR"
+  ),
+
+  # =========================================================================
+  # COMPUTATIONAL
+  # =========================================================================
+  device = "auto",                        # "cpu", "cuda", "mps", or "auto"
+  seed = 42L,                             # Global random seed
+  gc_every = 10L                          # Garbage collection frequency
 )
 
 # Print configuration
@@ -284,7 +355,7 @@ print_aggregation_summary(agg_results)
 
 # View event study table
 cat("\n--- Event Study Estimates ---\n")
-print(agg_results$event_study$event_study[, .(event_time, att, se, ci_lower, ci_upper)])
+print(agg_results$event_study$event_study[, .(event_time, att, se, ci_lower, ci_upper, uniform_lower, uniform_upper)])
 
 # =============================================================================
 # CELL 9: VISUALIZATION
@@ -374,6 +445,9 @@ es <- agg_results$event_study$event_study
 cat(sprintf("   Event times: %d to %d\n", min(es$event_time), max(es$event_time)))
 cat(sprintf("   Pre-treatment mean: %.4f\n", mean(es[event_time < 0, att])))
 cat(sprintf("   Post-treatment mean: %.4f\n", mean(es[event_time >= 0, att])))
+if (!is.null(agg_results$event_study$uniform_bands)) {
+  cat(sprintf("   Sup-t critical value: %.3f\n", agg_results$event_study$uniform_bands$sup_t_critical))
+}
 
 cat("\n")
 cat(sprintf("Training time: %.1f minutes\n", training_time/60))
