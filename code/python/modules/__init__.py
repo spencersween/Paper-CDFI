@@ -1,123 +1,133 @@
 """
-DiD Estimation Pipeline - Python/PyTorch Implementation
+CDFI DiD Estimation Pipeline v2.0
 
-Callaway & Sant'Anna (2021) difference-in-differences with neural network nuisance estimation.
+Callaway & Sant'Anna (2021) Difference-in-Differences with Neural Network
+Nuisance Parameter Estimation.
+
+Redesigned for efficiency:
+- Wide unit-level data structure
+- Base-period grouped covariate projections
+- Single forward pass for all (g,t) heads
+- On-the-fly outcome differencing
+
+Modules (numbered in order of use):
+- m00_config: Configuration
+- m01_utils: Utility functions
+- m02_data_loader: Data loading and unit-level structure
+- m03_covariate_selector: Covariate masks by base period
+- m04_nn_architecture: Multi-task neural network
+- m05_nn_training: Training loop
+- m06_cross_fitting: K-fold cross-fitting
+- m07_att_estimation: Doubly-robust ATT estimation
+- m08_inference: Clustered bootstrap inference
+- m09_aggregation: Event study aggregation
+- m10_visualization: Plotting
 """
 
-from .config import (
+# Configuration
+from .m00_config import (
     Config,
     create_config,
     get_device,
     set_seed,
-    print_config,
-    ArchitectureConfig,
-    TrainingConfig,
-    CrossFittingConfig,
-    InferenceConfig,
-    EventStudyConfig
+    print_config
 )
 
-from .utils import (
+# Utilities
+from .m01_utils import (
+    Timer,
     log_message,
-    ensure_dir,
-    file_size_human,
-    clamp,
-    Timer
+    clamp
 )
 
-from .data_loader import (
+# Data loading
+from .m02_data_loader import (
+    UnitData,
+    GTInfo,
     load_panel_data,
-    get_gt_pairs,
-    create_gt_sample,
-    summarize_data,
-    PanelMetadata
+    create_unit_data,
+    create_gt_info,
+    create_sample_masks,
+    compute_outcome_diffs
 )
 
-from .covariate_selector import (
-    get_covariate_info,
-    get_covariates_for_gt,
-    prepare_gt_covariate_matrix,
-    create_covariate_masks,
-    validate_covariate_rules,
-    CovariateInfo
+# Covariate selection
+from .m03_covariate_selector import (
+    CovariateInfo,
+    create_covariate_info
 )
 
-from .nn_architecture import (
+# Neural network
+from .m04_nn_architecture import (
     MultiTaskDiDNet,
-    create_model,
-    count_parameters,
-    print_model_summary
+    create_model
 )
 
-from .nn_training import (
+# Training
+from .m05_nn_training import (
+    DiDDataset,
     train_model,
-    compute_loss,
-    create_optimizer,
     TrainingHistory
 )
 
-from .cross_fitting import (
+# Cross-fitting
+from .m06_cross_fitting import (
+    CrossFitResults,
     run_cross_fitting,
-    validate_cross_fitting,
-    assign_cluster_folds,
-    add_fold_column
+    validate_cross_fitting
 )
 
-from .nuisance_estimation import (
-    get_nuisance_gt,
-    organize_nuisance_estimates,
-    diagnose_nuisance
-)
-
-from .att_estimation import (
-    compute_att_gt,
+# ATT estimation
+from .m07_att_estimation import (
+    ATTResults,
     compute_all_att,
     print_att_summary
 )
 
-from .inference import (
+# Inference
+from .m08_inference import (
     add_bootstrap_inference,
     test_parallel_trends,
-    compute_simple_att,
-    clustered_bootstrap
+    compute_simple_att
 )
 
-from .aggregation import (
-    aggregate_all,
+# Aggregation
+from .m09_aggregation import (
     aggregate_event_study,
-    aggregate_by_group,
-    aggregate_by_time,
+    aggregate_all,
     print_aggregation_summary
 )
 
-from .visualization import (
+# Visualization
+from .m10_visualization import (
     plot_event_study,
     save_event_study,
-    generate_all_figures,
-    plot_att_by_group,
-    plot_att_by_time
+    plot_training_history
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
     # Config
     'Config', 'create_config', 'get_device', 'set_seed', 'print_config',
     # Utils
-    'log_message', 'ensure_dir', 'Timer',
+    'Timer', 'log_message', 'clamp',
     # Data
-    'load_panel_data', 'get_gt_pairs', 'create_gt_sample', 'summarize_data',
+    'UnitData', 'GTInfo', 'load_panel_data', 'create_unit_data', 'create_gt_info',
+    'create_sample_masks', 'compute_outcome_diffs',
     # Covariates
-    'get_covariate_info', 'prepare_gt_covariate_matrix', 'validate_covariate_rules',
+    'CovariateInfo', 'create_covariate_info',
     # Model
     'MultiTaskDiDNet', 'create_model',
     # Training
-    'train_model', 'run_cross_fitting', 'validate_cross_fitting',
-    # Estimation
-    'compute_all_att', 'print_att_summary', 'diagnose_nuisance',
+    'DiDDataset', 'train_model', 'TrainingHistory',
+    # Cross-fitting
+    'CrossFitResults', 'run_cross_fitting', 'validate_cross_fitting',
+    # ATT
+    'ATTResults', 'compute_all_att', 'print_att_summary',
     # Inference
     'add_bootstrap_inference', 'test_parallel_trends', 'compute_simple_att',
     # Aggregation
-    'aggregate_all', 'print_aggregation_summary',
+    'aggregate_event_study', 'aggregate_all', 'print_aggregation_summary',
     # Visualization
-    'plot_event_study', 'save_event_study', 'generate_all_figures'
+    'plot_event_study', 'save_event_study', 'plot_training_history'
 ]
