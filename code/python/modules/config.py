@@ -4,7 +4,7 @@ Configuration Module for DiD Estimation
 Provides default configuration and helper functions for the estimation pipeline.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from typing import List, Optional, Dict, Any
 import torch
 import random
@@ -175,26 +175,34 @@ class Config:
 
 
 def _update_dataclass(obj, updates: dict):
-    """Recursively update a dataclass from a dict."""
+    """Recursively update a dataclass from a dict.
+
+    Uses is_dataclass() to reliably detect dataclass instances for nested updates.
+    """
     for key, value in updates.items():
         if hasattr(obj, key):
             existing = getattr(obj, key)
-            # If both existing and value are suitable for recursive update
-            if isinstance(value, dict) and hasattr(existing, '__dataclass_fields__'):
+            # If value is a dict and existing is a dataclass instance, recurse
+            # is_dataclass() returns True for both classes and instances
+            # We check it's not a type to ensure it's an instance
+            if isinstance(value, dict) and is_dataclass(existing) and not isinstance(existing, type):
                 _update_dataclass(existing, value)
             else:
                 setattr(obj, key, value)
 
 
 def create_config(**kwargs) -> Config:
-    """Create configuration with optional overrides."""
+    """Create configuration with optional overrides.
+
+    Handles nested dicts by recursively updating corresponding dataclass attributes.
+    """
     config = Config()
 
     for key, value in kwargs.items():
         if hasattr(config, key):
             existing = getattr(config, key)
-            if isinstance(value, dict) and hasattr(existing, '__dataclass_fields__'):
-                # Recursively update nested dataclass
+            # Check if we should recursively update a nested dataclass
+            if isinstance(value, dict) and is_dataclass(existing) and not isinstance(existing, type):
                 _update_dataclass(existing, value)
             else:
                 setattr(config, key, value)
