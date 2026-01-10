@@ -192,8 +192,16 @@ def create_scheduler(
     elif sched_config.name == "step":
         return torch.optim.lr_scheduler.StepLR(
             optimizer,
-            step_size=30,
-            gamma=0.1
+            step_size=sched_config.step_size,
+            gamma=sched_config.gamma
+        )
+    elif sched_config.name == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=sched_config.plateau_factor,
+            patience=sched_config.plateau_patience,
+            min_lr=sched_config.plateau_min_lr
         )
     return None
 
@@ -345,7 +353,10 @@ def train_model(
 
         # Update scheduler
         if scheduler is not None:
-            scheduler.step()
+            if config.scheduler.name == "plateau":
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
 
         # Record history
         history.train_loss.append(train_loss)

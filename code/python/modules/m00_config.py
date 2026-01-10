@@ -47,8 +47,16 @@ class OptimizerConfig:
 class SchedulerConfig:
     """Learning rate scheduler configuration."""
     name: str = "cosine"  # "none", "cosine", "step", "plateau"
+    # Cosine annealing parameters
     T_max: int = 100
     eta_min: float = 1e-6
+    # Step scheduler parameters
+    step_size: int = 30
+    gamma: float = 0.1
+    # Plateau scheduler parameters
+    plateau_factor: float = 0.1
+    plateau_patience: int = 10
+    plateau_min_lr: float = 1e-6
 
 
 @dataclass
