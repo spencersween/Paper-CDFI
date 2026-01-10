@@ -58,8 +58,8 @@ def clustered_bootstrap(att_results: Dict, config: Config) -> Dict:
     n_clusters = len(clusters)
     cluster_map = pd.Series(range(len(clusters)), index=clusters)
 
-    # Map unit IDs to cluster indices
-    cluster_indices = np.array([cluster_map[unit_clusters[uid]] for uid in unit_ids])
+    # Map unit IDs to cluster indices (explicit int64 for indexing)
+    cluster_indices = np.array([cluster_map[unit_clusters[uid]] for uid in unit_ids], dtype=np.int64)
 
     log_message(f"  Units: {n_units}, Clusters: {n_clusters}")
 

@@ -52,18 +52,22 @@ def get_nuisance_gt(cf_results: Dict, g: int, t: int, config: Config) -> Nuisanc
     sample_ids = sample[config.id_var].values
 
     # Map sample IDs to unit-level row indices
-    unit_rows = np.array([id_to_row.get(sid, -1) for sid in sample_ids])
-    valid_rows = unit_rows >= 0
+    # Explicitly use int64 dtype to avoid indexing errors
+    unit_rows = np.array([id_to_row.get(sid, -1) for sid in sample_ids], dtype=np.int64)
+    valid_mask = unit_rows >= 0
 
-    if not valid_rows.all():
-        n_missing = (~valid_rows).sum()
+    if not valid_mask.all():
+        n_missing = (~valid_mask).sum()
         log_message(f"Warning: {n_missing} sample units not found in id_to_row", level="WARNING")
+
+    # Get valid row indices as integer array for indexing
+    valid_unit_rows = unit_rows[valid_mask]
 
     # Extract nuisance estimates from unit-level storage
     mu_0 = np.full(len(sample_ids), np.nan)
     ps = np.full(len(sample_ids), np.nan)
-    mu_0[valid_rows] = cf_results['outcome'][unit_rows[valid_rows], gt_idx]
-    ps[valid_rows] = cf_results['propensity'][unit_rows[valid_rows], gt_idx]
+    mu_0[valid_mask] = cf_results['outcome'][valid_unit_rows, gt_idx]
+    ps[valid_mask] = cf_results['propensity'][valid_unit_rows, gt_idx]
 
     return NuisanceEstimates(
         mu_0=mu_0,
