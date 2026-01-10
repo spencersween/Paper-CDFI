@@ -2,23 +2,155 @@
 Event Study Aggregation Module
 
 Aggregates ATT(g,t) estimates to event study format and other summaries.
+Implements proper influence function aggregation for uniform inference.
 """
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from scipy import stats
 
 from .utils import log_message
 from .config import Config
 from .inference import compute_simple_att
 
 
+def aggregate_influence_functions(
+    att_results: Dict,
+    event_times: List[int],
+    weights_by_event: Dict[int, np.ndarray],
+    indices_by_event: Dict[int, np.ndarray]
+) -> np.ndarray:
+    """
+    Aggregate influence functions to event study level.
+
+    For each event time e, the aggregated IF is:
+        IF_e = sum_j(w_j * IF_j) for all (g,t) pairs with event_time = e
+
+    Returns:
+        Aggregated influence functions: (n_events, n_obs) array
+    """
+    influence_functions = att_results['influence_functions']
+    n_obs = influence_functions[0].shape[0] if len(influence_functions) > 0 else 0
+    n_events = len(event_times)
+
+    agg_if = np.zeros((n_events, n_obs))
+
+    for i, e in enumerate(event_times):
+        if e not in weights_by_event:
+            continue
+        weights = weights_by_event[e]
+        indices = indices_by_event[e]
+
+        # Weighted sum of influence functions
+        for w, idx in zip(weights, indices):
+            if idx < len(influence_functions):
+                agg_if[i, :] += w * influence_functions[idx]
+
+    return agg_if
+
+
+def compute_clustered_se_and_bootstrap(
+    att_vals: np.ndarray,
+    agg_influence_functions: np.ndarray,
+    cluster_indices: np.ndarray,
+    n_clusters: int,
+    n_bootstrap: int,
+    multiplier_dist: str = "normal",
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute clustered SEs and bootstrap distribution from aggregated influence functions.
+
+    Returns:
+        (se, bootstrap_dist) tuple
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    n_events = agg_influence_functions.shape[0]
+    n_obs = agg_influence_functions.shape[1]
+
+    # Aggregate influence functions by cluster
+    cluster_if = np.zeros((n_events, n_clusters))
+    for c in range(n_clusters):
+        mask = cluster_indices == c
+        cluster_if[:, c] = np.nansum(agg_influence_functions[:, mask], axis=1)
+
+    # Clustered variance: Var(ATT_e) = (1/N^2) * sum_c(IF_ec^2)
+    # But for multiplier bootstrap, we generate xi_c and compute:
+    # ATT_e^* = ATT_e + (1/N) * sum_c(xi_c * IF_ec)
+
+    # Generate multiplier weights
+    if multiplier_dist == "normal":
+        xi = np.random.randn(n_clusters, n_bootstrap)
+    elif multiplier_dist == "rademacher":
+        xi = np.random.choice([-1, 1], size=(n_clusters, n_bootstrap))
+    else:
+        xi = np.random.randn(n_clusters, n_bootstrap)
+
+    # Bootstrap distribution
+    boot_dist = np.zeros((n_events, n_bootstrap))
+    for e in range(n_events):
+        for b in range(n_bootstrap):
+            boot_dist[e, b] = att_vals[e] + np.sum(xi[:, b] * cluster_if[e, :]) / n_obs
+
+    # Standard errors from bootstrap
+    se = np.nanstd(boot_dist, axis=1)
+
+    return se, boot_dist
+
+
+def compute_uniform_bands(
+    att_vals: np.ndarray,
+    se_vals: np.ndarray,
+    boot_dist: np.ndarray,
+    alpha: float
+) -> Dict:
+    """
+    Compute uniform confidence bands using sup-t method.
+
+    The sup-t method finds critical value c such that:
+        P(max_e |t_e| <= c) = 1 - alpha
+
+    where t_e = (ATT_e^* - ATT_e) / SE_e
+    """
+    n_events = len(att_vals)
+
+    # T-statistics for each bootstrap draw
+    t_stats = np.abs(boot_dist - att_vals[:, np.newaxis]) / se_vals[:, np.newaxis]
+    t_stats[~np.isfinite(t_stats)] = np.nan
+
+    # Supremum t-statistic for each bootstrap draw
+    sup_t = np.nanmax(t_stats, axis=0)
+
+    # Critical value: (1-alpha) quantile of sup-t distribution
+    c_alpha = np.nanpercentile(sup_t, 100 * (1 - alpha))
+
+    log_message(f"  Uniform bands: sup-t critical value = {c_alpha:.3f} (alpha={alpha})")
+
+    return {
+        'uniform_lower': att_vals - c_alpha * se_vals,
+        'uniform_upper': att_vals + c_alpha * se_vals,
+        'sup_t_critical': c_alpha,
+        'sup_t_distribution': sup_t
+    }
+
+
 def aggregate_event_study(att_results: Dict, config: Config) -> Dict:
-    """Aggregate ATT(g,t) to event study format."""
-    log_message("Aggregating to event study...")
+    """
+    Aggregate ATT(g,t) to event study format with proper influence function inference.
+
+    Steps:
+    1. Compute weighted average ATT(e) for each event time
+    2. Aggregate influence functions using same weights
+    3. Compute clustered bootstrap from aggregated IFs
+    4. Compute pointwise CIs and uniform bands
+    """
+    log_message("Aggregating to event study with influence function inference...")
 
     att_df = att_results['att']
-    boot_dist = att_results['bootstrap']['bootstrap_dist']
+    data = att_results['data']
 
     # Event study window
     min_e = -config.event_study.pre_periods
@@ -29,58 +161,87 @@ def aggregate_event_study(att_results: Dict, config: Config) -> Dict:
     event_times = [e for e in event_times if min_e <= e <= max_e]
 
     n_events = len(event_times)
-    n_boot = boot_dist.shape[1]
 
-    # Storage
+    # Storage for weights and indices (needed for IF aggregation)
+    weights_by_event = {}
+    indices_by_event = {}
     es_results = []
-    es_boot = np.full((n_events, n_boot), np.nan)
 
     for i, e in enumerate(event_times):
-        idx = att_df['event_time'] == e
-        n_groups = idx.sum()
+        mask = att_df['event_time'] == e
+        idx_positions = np.where(mask)[0]
+        n_groups = mask.sum()
 
         if n_groups == 0:
             continue
 
-        # Weights
+        # Weights (by group size or equal)
         if config.event_study.weight_by_group_size:
-            weights = att_df.loc[idx, 'n_treated'].values
+            weights = att_df.loc[mask, 'n_treated'].values.astype(float)
         else:
             weights = np.ones(n_groups)
         weights = weights / np.nansum(weights)
 
-        # Weighted average ATT
-        att_e = np.nansum(weights * att_df.loc[idx, 'att'].values)
+        # Store for IF aggregation
+        weights_by_event[e] = weights
+        indices_by_event[e] = idx_positions
 
-        # Bootstrap distribution
-        boot_e = np.nansum(weights[:, np.newaxis] * boot_dist[idx.values, :], axis=0)
-        es_boot[i, :] = boot_e
+        # Weighted average ATT
+        att_e = np.nansum(weights * att_df.loc[mask, 'att'].values)
 
         es_results.append({
             'event_time': e,
             'att': att_e,
-            'n_groups': n_groups
+            'n_groups': n_groups,
+            'total_treated': att_df.loc[mask, 'n_treated'].sum()
         })
 
     es_df = pd.DataFrame(es_results)
+    att_vals = es_df['att'].values
 
-    # Compute SEs and CIs
-    es_df['se'] = np.nanstd(es_boot, axis=1)[:len(es_df)]
+    # Aggregate influence functions
+    log_message("  Aggregating influence functions...")
+    agg_if = aggregate_influence_functions(
+        att_results, event_times, weights_by_event, indices_by_event
+    )
 
+    # Get cluster information
+    cluster_var = config.cluster_var
+    clusters = data[cluster_var].unique()
+    n_clusters = len(clusters)
+    cluster_map = pd.Series(range(len(clusters)), index=clusters)
+    cluster_indices = data[cluster_var].map(cluster_map).values
+
+    log_message(f"  Computing clustered bootstrap ({config.inference.n_bootstrap} reps, {n_clusters} clusters)...")
+
+    # Compute SEs and bootstrap from aggregated IFs
+    se_vals, es_boot = compute_clustered_se_and_bootstrap(
+        att_vals,
+        agg_if,
+        cluster_indices,
+        n_clusters,
+        config.inference.n_bootstrap,
+        config.inference.multiplier_dist,
+        config.inference.seed
+    )
+
+    es_df['se'] = se_vals
+
+    # Pointwise CIs (percentile method)
     alpha = config.inference.alpha
-    es_df['ci_lower'] = np.nanpercentile(es_boot, 100 * alpha / 2, axis=1)[:len(es_df)]
-    es_df['ci_upper'] = np.nanpercentile(es_boot, 100 * (1 - alpha / 2), axis=1)[:len(es_df)]
+    es_df['ci_lower'] = np.nanpercentile(es_boot, 100 * alpha / 2, axis=1)
+    es_df['ci_upper'] = np.nanpercentile(es_boot, 100 * (1 - alpha / 2), axis=1)
 
-    # Uniform bands
+    # P-values
+    es_df['t_stat'] = att_vals / se_vals
+    es_df['p_value'] = 2 * stats.norm.sf(np.abs(es_df['t_stat']))
+
+    # Uniform confidence bands
+    uniform_results = None
     if config.inference.uniform_bands:
-        att_vals = es_df['att'].values
-        se_vals = es_df['se'].values
-        t_stats = np.abs(es_boot[:len(es_df), :] - att_vals[:, np.newaxis]) / se_vals[:, np.newaxis]
-        t_stats[~np.isfinite(t_stats)] = np.nan
-        sup_t = np.nanmax(t_stats, axis=0)
-        c_alpha = np.nanpercentile(sup_t, 100 * (1 - alpha))
-        es_df['uniform_lower'] = att_vals - c_alpha * se_vals
-        es_df['uniform_upper'] = att_vals + c_alpha * se_vals
+        uniform_results = compute_uniform_bands(att_vals, se_vals, es_boot, alpha)
+        es_df['uniform_lower'] = uniform_results['uniform_lower']
+        es_df['uniform_upper'] = uniform_results['uniform_upper']
 
     # Normalize to reference period
     ref_period = config.event_study.reference_period
@@ -88,15 +249,18 @@ def aggregate_event_study(att_results: Dict, config: Config) -> Dict:
     if ref_idx.any():
         ref_att = es_df.loc[ref_idx, 'att'].values[0]
         es_df['att_normalized'] = es_df['att'] - ref_att
-        log_message(f"Normalized to event time {ref_period} (ATT = {ref_att:.4f})")
+        log_message(f"  Normalized to event time {ref_period} (ATT = {ref_att:.4f})")
     else:
         es_df['att_normalized'] = es_df['att']
 
-    log_message(f"Event study: {len(es_df)} event times ({es_df['event_time'].min()} to {es_df['event_time'].max()})")
+    log_message(f"  Event study complete: {len(es_df)} event times (e={es_df['event_time'].min()} to {es_df['event_time'].max()})")
 
     return {
         'event_study': es_df,
-        'bootstrap_dist': es_boot[:len(es_df), :]
+        'bootstrap_dist': es_boot,
+        'aggregated_influence_functions': agg_if,
+        'uniform_bands': uniform_results,
+        'n_clusters': n_clusters
     }
 
 
