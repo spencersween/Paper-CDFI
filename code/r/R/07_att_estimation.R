@@ -4,8 +4,9 @@
 
 #' Compute doubly-robust ATT(g,t) estimate
 #'
-#' Uses the influence function approach from CS2021:
-#' ATT(g,t) = E[w1 * (DeltaY - mu_0)] - E[w0 * (DeltaY - mu_0)]
+#' Uses the doubly-robust approach from Callaway & Sant'Anna (2021):
+#' ATT(g,t) = E[ w * (DeltaY - mu_0) ]
+#' where w = (D - ps) / (p_g * (1 - ps))
 #'
 #' @param nuisance List with mu_0, ps, delta_y, D from get_nuisance_gt
 #' @param config Configuration object
@@ -53,28 +54,25 @@ compute_att_gt <- function(nuisance, config) {
   # Residuals
   residual <- delta_y - mu_0
 
-  # Weights
-  # Treated: w1 = D / p_g
-  # Control: w0 = (1-D) * ps / ((1-ps) * p_g)
-  w1 <- D / p_g
-  w0 <- (1 - D) * ps / ((1 - ps) * p_g)
+  # Doubly-robust ATT following CS2021:
+  # ATT = E[ w * (DeltaY - mu_0) ]
+  # where w = (D - ps) / (p_g * (1 - ps))
+  #
+  # This unified weight formula handles both treated and controls:
+  # - For treated (D=1): w = (1 - ps) / (p_g * (1 - ps)) = 1/p_g
+  # - For control (D=0): w = -ps / (p_g * (1 - ps))
+  w <- (D - ps) / (p_g * (1 - ps))
 
-  # Normalize control weights to sum to n_control
+  # Number of controls for reporting
   n_control <- sum(1 - D)
-  if (n_control > 0) {
-    w0_sum <- sum(w0)
-    if (w0_sum > 0) {
-      w0 <- w0 * n_control / w0_sum
-    }
-  }
 
   # ATT estimate (doubly-robust)
-  att <- mean(w1 * residual) - mean(w0 * residual)
+  att <- mean(w * residual)
 
-  # Influence function for each observation
-  # IF_i = (D_i/p_g) * (residual_i - ATT) - ((1-D_i)*ps_i/((1-ps_i)*p_g)) * residual_i
-  inf_func_valid <- (D / p_g) * (residual - att) -
-                    ((1 - D) * ps / ((1 - ps) * p_g)) * residual
+  # Influence function for CS2021 doubly-robust estimator:
+  # IF_i = w_i * (residual_i - ATT)
+  # This applies to ALL units (treated and controls)
+  inf_func_valid <- w * (residual - att)
 
   # Expand back to full sample
   inf_func <- rep(NA_real_, n)

@@ -114,12 +114,17 @@ prepare_gt_training_data <- function(data, g, t, gt_index, covariate_info, confi
   # Prepare (g,t)-specific covariate matrix (only relevant covariates)
   X <- prepare_gt_covariate_matrix(sample, gt_index, covariate_info)
 
+  # Get cluster IDs for cluster-based validation split
+  cluster_var <- config$cross_fitting$stratify_by
+  cluster_ids <- if (cluster_var %in% names(sample)) sample[[cluster_var]] else NULL
+
   list(
     X = X,
     delta_y = sample$delta_y,
     D = sample$D,
     fold = sample$fold,
     ids = sample[[config$id_var]],
+    cluster_ids = cluster_ids,
     n = nrow(sample),
     gt_index = gt_index,
     covariate_dim = ncol(X)
@@ -317,8 +322,9 @@ run_cross_fitting <- function(data, gt_pairs, all_covariates,
       data, gt_pairs, covariate_info, train_folds, config
     )
 
-    # Create internal validation split for early stopping
-    val_combined <- create_validation_split(train_combined, config)
+    # Create internal validation split for early stopping BY CLUSTER
+    # (not by unit, to avoid leakage within clusters)
+    val_combined <- create_validation_split(train_combined, data, train_folds, config)
     train_final <- val_combined$train
     val_final <- val_combined$val
 
@@ -368,15 +374,36 @@ run_cross_fitting <- function(data, gt_pairs, all_covariates,
 }
 
 
-#' Create validation split from training data
+#' Create validation split from training data BY CLUSTER
+#'
+#' Splits training data by cluster ID to avoid leakage within clusters.
+#' This is critical for proper inference - observations from the same cluster
+#' should not appear in both training and validation.
 #'
 #' @param combined_data List from prepare_combined_training_data
+#' @param data data.table. Full data with cluster information
+#' @param train_folds Integer vector. Folds used for training
 #' @param config Configuration object
 #' @return List with train and val data
-create_validation_split <- function(combined_data, config) {
+create_validation_split <- function(combined_data, data, train_folds, config) {
 
   val_split <- config$training$validation_split
+  cluster_var <- config$cross_fitting$stratify_by
   gt_data_list <- combined_data$gt_data
+
+  # Get unique clusters in training folds
+  train_data <- data[fold %in% train_folds]
+  train_clusters <- unique(train_data[[cluster_var]])
+  n_train_clusters <- length(train_clusters)
+
+  # Randomly select clusters for internal validation
+  # Random each fold - no fixed seed
+  n_val_clusters <- max(1, floor(n_train_clusters * val_split))
+  perm_clusters <- sample(n_train_clusters)
+  val_cluster_set <- train_clusters[perm_clusters[seq_len(n_val_clusters)]]
+
+  log_message(sprintf("  Internal split: %d/%d clusters for train/val",
+                      n_train_clusters - n_val_clusters, n_val_clusters))
 
   train_gt_data <- vector("list", length(gt_data_list))
   val_gt_data <- vector("list", length(gt_data_list))
@@ -386,10 +413,26 @@ create_validation_split <- function(combined_data, config) {
 
     if (is.null(gt_data)) next
 
-    n <- gt_data$n
-    n_val <- max(1, floor(n * val_split))
-    val_indices <- sample(n, n_val)
-    train_indices <- setdiff(seq_len(n), val_indices)
+    # Get cluster IDs for each observation in this (g,t) sample
+    # We need to look up the cluster based on the unit IDs stored in gt_data
+    # Note: gt_data should have ids stored from prepare_gt_training_data
+    if (!"cluster_ids" %in% names(gt_data)) {
+      # Fallback: if cluster IDs weren't stored, use random split (less ideal)
+      n <- gt_data$n
+      n_val <- max(1, floor(n * val_split))
+      val_indices <- sample(n, n_val)
+      train_indices <- setdiff(seq_len(n), val_indices)
+    } else {
+      # Use cluster-based split
+      cluster_ids <- gt_data$cluster_ids
+      val_mask <- cluster_ids %in% val_cluster_set
+      train_indices <- which(!val_mask)
+      val_indices <- which(val_mask)
+
+      # Handle edge cases
+      if (length(train_indices) == 0) train_indices <- seq_len(gt_data$n)
+      if (length(val_indices) == 0) val_indices <- sample(gt_data$n, 1)
+    }
 
     # Training split
     train_gt_data[[gt_idx]] <- list(

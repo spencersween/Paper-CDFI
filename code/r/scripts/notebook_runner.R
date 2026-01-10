@@ -10,7 +10,7 @@
 # =============================================================================
 
 # Set your project root (adjust for your environment)
-project_root <- "/path/to/your/project"  # <-- CHANGE THIS
+project_root <- "/Users/spencersween/Dropbox/Paper -- CDFI -- Sween 2026"  # <-- CHANGE THIS
 setwd(project_root)
 
 # Install packages if needed (uncomment if first run)
@@ -54,13 +54,13 @@ config <- create_config(
   # NEURAL NETWORK ARCHITECTURE
   # =========================================================================
   architecture = list(
-    input_projection_dim = 128L,         # Dimension after per-(g,t) input projection
-    shared_layers = c(256L, 128L),       # Shared encoder layers
-    outcome_head_layers = c(64L, 32L),   # Outcome regression head layers
-    propensity_head_layers = c(64L, 32L),# Propensity score head layers
+    input_projection_dim = 4,         # Dimension after per-(g,t) input projection
+    shared_layers = c(4),       # Shared encoder layers
+    outcome_head_layers = c(4),   # Outcome regression head layers
+    propensity_head_layers = c(4),# Propensity score head layers
     activation = "relu",                  # "relu", "leaky_relu", "elu", "gelu"
-    dropout = 0.2,                        # Dropout rate [0, 1)
-    layer_norm = TRUE,                    # Use LayerNorm (better for variable inputs)
+    dropout = 0.0,                        # Dropout rate [0, 1)
+    layer_norm = FALSE,                    # Use LayerNorm (better for variable inputs)
     residual_connections = FALSE          # Skip connections
   ),
 
@@ -87,7 +87,7 @@ config <- create_config(
   # LEARNING RATE SCHEDULER
   # =========================================================================
   scheduler = list(
-    type = "cosine",                      # "none", "step", "cosine", "reduce_on_plateau"
+    type = "none",                      # "none", "step", "cosine", "reduce_on_plateau"
     T_max = 100L,                         # Cosine: period length
     eta_min = 1e-6,                       # Cosine: minimum LR
     step_size = 30L,                      # Step: epochs between decay
@@ -101,9 +101,9 @@ config <- create_config(
   # TRAINING
   # =========================================================================
   training = list(
-    epochs = 100L,                        # Maximum epochs
-    batch_size = 512L,                    # Batch size
-    validation_split = 0.2,               # Internal validation split
+    epochs = 10L,                        # Maximum epochs
+    batch_size = 1000000L,                    # Batch size
+    validation_split = 0.1,               # Internal validation split
     shuffle = TRUE,                       # Shuffle training data
 
     early_stopping = list(
@@ -190,7 +190,7 @@ config <- create_config(
   # =========================================================================
   # COMPUTATIONAL
   # =========================================================================
-  device = "auto",                        # "cpu", "cuda", "mps", or "auto"
+  device = "cpu",                        # "cpu", "cuda", "mps", or "auto"
   seed = 42L,                             # Global random seed
   gc_every = 10L                          # Garbage collection frequency
 )
@@ -208,7 +208,7 @@ set_seed(config$seed)
 data_path <- file.path(project_root, "data/analysis/final_analysis_dataset.csv")
 
 # Load data (set sample_n for testing, NULL for full data)
-sample_n <- NULL  # Set to e.g. 50000 for testing, NULL for full dataset
+sample_n <- 50000  # Set to e.g. 50000 for testing, NULL for full dataset
 
 cat("Loading data...\n")
 t1 <- Sys.time()

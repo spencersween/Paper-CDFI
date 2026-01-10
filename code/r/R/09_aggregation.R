@@ -280,17 +280,37 @@ aggregate_event_study <- function(att_results, config) {
 
 #' Aggregate by treatment group (cohort-specific effects)
 #'
+#' Uses proper IF aggregation and clustered bootstrap following CS2021.
+#'
 #' @param att_results List from add_bootstrap_inference
 #' @param config Configuration object
 #' @return data.table with group-specific estimates
 aggregate_by_group <- function(att_results, config) {
 
   att_dt <- att_results$att
-  boot_dist <- att_results$bootstrap$bootstrap_dist
+  influence_functions <- att_results$influence_functions
+  data <- att_results$data
+
+  n_units <- nrow(data)
+  n_bootstrap <- config$inference$n_bootstrap
+  cluster_var <- config$cluster_var
+
+  # Cluster information
+  clusters <- unique(data[[cluster_var]])
+  n_clusters <- length(clusters)
+  cluster_map <- match(data[[cluster_var]], clusters)
+
+  # Generate multiplier weights (different seed)
+  set.seed(config$inference$seed + 1)
+  if (config$inference$multiplier_dist == "normal") {
+    xi <- matrix(rnorm(n_clusters * n_bootstrap), n_clusters, n_bootstrap)
+  } else {
+    xi <- matrix(sample(c(-1, 1), n_clusters * n_bootstrap, replace = TRUE),
+                 n_clusters, n_bootstrap)
+  }
 
   groups <- sort(unique(att_dt$g))
   n_groups <- length(groups)
-  n_boot <- ncol(boot_dist)
 
   group_results <- data.table::data.table(
     g = groups,
@@ -310,11 +330,31 @@ aggregate_by_group <- function(att_results, config) {
 
     if (n_periods == 0) next
 
-    # Simple average
-    att_g <- mean(att_dt$att[idx], na.rm = TRUE)
+    # Equal weights across periods
+    weights <- rep(1 / n_periods, n_periods)
+
+    # Weighted average ATT
+    att_g <- sum(weights * att_dt$att[idx], na.rm = TRUE)
+
+    # Aggregate influence functions
+    agg_if <- rep(0, n_units)
+    for (k in seq_along(idx)) {
+      if_k <- influence_functions[[idx[k]]]
+      if_k[is.na(if_k)] <- 0
+      agg_if <- agg_if + weights[k] * if_k
+    }
+
+    # Aggregate by cluster
+    cluster_inf <- tapply(agg_if, cluster_map, sum, na.rm = TRUE)
+    full_cluster_inf <- rep(0, n_clusters)
+    cluster_ids_present <- as.integer(names(cluster_inf))
+    full_cluster_inf[cluster_ids_present] <- cluster_inf
 
     # Bootstrap
-    boot_g <- apply(boot_dist[idx, , drop = FALSE], 2, mean, na.rm = TRUE)
+    boot_g <- numeric(n_bootstrap)
+    for (b in seq_len(n_bootstrap)) {
+      boot_g[b] <- att_g + sum(xi[, b] * full_cluster_inf) / n_units
+    }
     se_g <- sd(boot_g, na.rm = TRUE)
 
     alpha <- config$inference$alpha
@@ -335,19 +375,39 @@ aggregate_by_group <- function(att_results, config) {
 
 #' Aggregate by calendar time
 #'
+#' Uses proper IF aggregation and clustered bootstrap following CS2021.
+#'
 #' @param att_results List from add_bootstrap_inference
 #' @param config Configuration object
 #' @return data.table with calendar time estimates
 aggregate_by_time <- function(att_results, config) {
 
   att_dt <- att_results$att
-  boot_dist <- att_results$bootstrap$bootstrap_dist
+  influence_functions <- att_results$influence_functions
+  data <- att_results$data
+
+  n_units <- nrow(data)
+  n_bootstrap <- config$inference$n_bootstrap
+  cluster_var <- config$cluster_var
+
+  # Cluster information
+  clusters <- unique(data[[cluster_var]])
+  n_clusters <- length(clusters)
+  cluster_map <- match(data[[cluster_var]], clusters)
+
+  # Generate multiplier weights (different seed)
+  set.seed(config$inference$seed + 2)
+  if (config$inference$multiplier_dist == "normal") {
+    xi <- matrix(rnorm(n_clusters * n_bootstrap), n_clusters, n_bootstrap)
+  } else {
+    xi <- matrix(sample(c(-1, 1), n_clusters * n_bootstrap, replace = TRUE),
+                 n_clusters, n_bootstrap)
+  }
 
   # Only post-treatment
   post_dt <- att_dt[is_pre == FALSE]
   times <- sort(unique(post_dt$t))
   n_times <- length(times)
-  n_boot <- ncol(boot_dist)
 
   time_results <- data.table::data.table(
     t = times,
@@ -366,16 +426,32 @@ aggregate_by_time <- function(att_results, config) {
 
     if (n_groups == 0) next
 
-    # Weighted average
+    # Weight by number of treated units
     weights <- att_dt$n_treated[idx]
     weights <- weights / sum(weights, na.rm = TRUE)
 
+    # Weighted average ATT
     att_t <- sum(weights * att_dt$att[idx], na.rm = TRUE)
 
+    # Aggregate influence functions
+    agg_if <- rep(0, n_units)
+    for (k in seq_along(idx)) {
+      if_k <- influence_functions[[idx[k]]]
+      if_k[is.na(if_k)] <- 0
+      agg_if <- agg_if + weights[k] * if_k
+    }
+
+    # Aggregate by cluster
+    cluster_inf <- tapply(agg_if, cluster_map, sum, na.rm = TRUE)
+    full_cluster_inf <- rep(0, n_clusters)
+    cluster_ids_present <- as.integer(names(cluster_inf))
+    full_cluster_inf[cluster_ids_present] <- cluster_inf
+
     # Bootstrap
-    boot_t <- apply(boot_dist[idx, , drop = FALSE], 2, function(x) {
-      sum(weights * x, na.rm = TRUE)
-    })
+    boot_t <- numeric(n_bootstrap)
+    for (b in seq_len(n_bootstrap)) {
+      boot_t[b] <- att_t + sum(xi[, b] * full_cluster_inf) / n_units
+    }
     se_t <- sd(boot_t, na.rm = TRUE)
 
     alpha <- config$inference$alpha

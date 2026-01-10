@@ -186,7 +186,9 @@ get_gt_pairs <- function(data, config) {
 
     # Control: not-yet-treated at time t
     # This includes never-treated (group = 0) and groups that start after t
-    n_control <- data[get(config$group_var) == 0 | get(config$group_var) > t_i,
+    # IMPORTANT: Exclude the treated group to avoid overlap
+    n_control <- data[(get(config$group_var) == 0 | get(config$group_var) > t_i) &
+                       get(config$group_var) != g_i,
                       uniqueN(get(config$id_var))]
 
     data.table::set(gt_pairs, i, "n_treated", n_treated)
@@ -224,7 +226,10 @@ create_gt_sample <- function(data, g, t, config) {
 
   # Get IDs of not-yet-treated units at time t
   # This includes never-treated (group = 0) and groups starting after t
-  control_ids <- data[get(config$group_var) == 0 | get(config$group_var) > t,
+  # IMPORTANT: Exclude the treated group to avoid overlap (critical for pre-treatment
+  # periods where g > t, so treated group would otherwise satisfy groups > t)
+  control_ids <- data[(get(config$group_var) == 0 | get(config$group_var) > t) &
+                       get(config$group_var) != g,
                       unique(get(config$id_var))]
 
   # Get data for current period t

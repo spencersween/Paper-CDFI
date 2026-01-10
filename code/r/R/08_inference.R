@@ -197,6 +197,7 @@ add_bootstrap_inference <- function(att_results, config) {
 #' Hypothesis test for pre-treatment effects (parallel trends)
 #'
 #' Tests whether pre-treatment ATT estimates are jointly zero.
+#' Uses proper IF aggregation and clustered bootstrap following CS2021.
 #'
 #' @param att_results List from add_bootstrap_inference
 #' @param config Configuration object
@@ -206,7 +207,12 @@ test_parallel_trends <- function(att_results, config) {
   log_message("Testing parallel trends (pre-treatment effects)...")
 
   att_dt <- att_results$att
-  boot_dist <- att_results$bootstrap$bootstrap_dist
+  influence_functions <- att_results$influence_functions
+  data <- att_results$data
+
+  n_units <- nrow(data)
+  n_bootstrap <- config$inference$n_bootstrap
+  cluster_var <- config$cluster_var
 
   # Pre-treatment indices
   pre_idx <- which(att_dt$is_pre == TRUE)
@@ -222,21 +228,56 @@ test_parallel_trends <- function(att_results, config) {
     ))
   }
 
-  # Point estimates for pre-treatment periods
+  # Equal weights for pre-treatment periods
+  weights <- rep(1 / n_pre, n_pre)
+
+  # Mean pre-treatment ATT
   att_pre <- att_dt$att[pre_idx]
-  boot_pre <- boot_dist[pre_idx, , drop = FALSE]
-
-  # Simple test: Wald test statistic
-  # H0: mean of pre-treatment ATTs = 0
   mean_att_pre <- mean(att_pre, na.rm = TRUE)
-  se_mean_pre <- sd(apply(boot_pre, 2, mean, na.rm = TRUE))
 
-  test_stat <- abs(mean_att_pre / se_mean_pre)
-  p_value <- 2 * pnorm(-test_stat)
+  # Aggregate influence functions with weights
+  agg_if <- rep(0, n_units)
+  for (k in seq_along(pre_idx)) {
+    idx <- pre_idx[k]
+    if_k <- influence_functions[[idx]]
+    if_k[is.na(if_k)] <- 0
+    agg_if <- agg_if + weights[k] * if_k
+  }
 
-  # Also compute max absolute pre-treatment ATT
-  max_abs_pre <- max(abs(att_pre), na.rm = TRUE)
-  se_max <- att_dt$se_boot[pre_idx][which.max(abs(att_pre))]
+  # Cluster information for bootstrap
+  clusters <- unique(data[[cluster_var]])
+  n_clusters <- length(clusters)
+  cluster_map <- match(data[[cluster_var]], clusters)
+
+  # Aggregate by cluster
+  cluster_inf <- tapply(agg_if, cluster_map, sum, na.rm = TRUE)
+  full_cluster_inf <- rep(0, n_clusters)
+  cluster_ids_present <- as.integer(names(cluster_inf))
+  full_cluster_inf[cluster_ids_present] <- cluster_inf
+
+  # Generate multiplier weights (different seed)
+  set.seed(config$inference$seed + 4)
+  if (config$inference$multiplier_dist == "normal") {
+    xi <- matrix(rnorm(n_clusters * n_bootstrap), n_clusters, n_bootstrap)
+  } else {
+    xi <- matrix(sample(c(-1, 1), n_clusters * n_bootstrap, replace = TRUE),
+                 n_clusters, n_bootstrap)
+  }
+
+  # Bootstrap
+  boot_mean_pre <- numeric(n_bootstrap)
+  for (b in seq_len(n_bootstrap)) {
+    boot_mean_pre[b] <- mean_att_pre + sum(xi[, b] * full_cluster_inf) / n_units
+  }
+  se_mean_pre <- sd(boot_mean_pre, na.rm = TRUE)
+
+  if (se_mean_pre == 0) {
+    test_stat <- NA
+    p_value <- NA
+  } else {
+    test_stat <- abs(mean_att_pre / se_mean_pre)
+    p_value <- 2 * pnorm(-test_stat)
+  }
 
   log_message(sprintf("  Pre-treatment periods: %d", n_pre))
   log_message(sprintf("  Mean pre-treatment ATT: %.4f (SE: %.4f)", mean_att_pre, se_mean_pre))
@@ -247,14 +288,15 @@ test_parallel_trends <- function(att_results, config) {
     p_value = p_value,
     mean_att_pre = mean_att_pre,
     se_mean_pre = se_mean_pre,
-    max_abs_pre = max_abs_pre,
     n_pre = n_pre,
-    reject = p_value < config$inference$alpha
+    reject = if (!is.na(p_value)) p_value < config$inference$alpha else NA
   )
 }
 
 
 #' Compute simple ATT (average post-treatment effect)
+#'
+#' Uses proper IF aggregation and clustered bootstrap following CS2021.
 #'
 #' @param att_results List from add_bootstrap_inference
 #' @param config Configuration object
@@ -262,7 +304,12 @@ test_parallel_trends <- function(att_results, config) {
 compute_simple_att <- function(att_results, config) {
 
   att_dt <- att_results$att
-  boot_dist <- att_results$bootstrap$bootstrap_dist
+  influence_functions <- att_results$influence_functions
+  data <- att_results$data
+
+  n_units <- nrow(data)
+  n_bootstrap <- config$inference$n_bootstrap
+  cluster_var <- config$cluster_var
 
   # Post-treatment indices
   post_idx <- which(att_dt$is_pre == FALSE)
@@ -271,17 +318,47 @@ compute_simple_att <- function(att_results, config) {
     return(list(att = NA, se = NA, ci_lower = NA, ci_upper = NA))
   }
 
-  # Weighted average (by group size)
+  # Weights (by number of treated units)
   weights <- att_dt$n_treated[post_idx]
   weights <- weights / sum(weights, na.rm = TRUE)
 
+  # Weighted average ATT
   att_simple <- sum(weights * att_dt$att[post_idx], na.rm = TRUE)
 
-  # Bootstrap SE
-  boot_simple <- apply(boot_dist[post_idx, , drop = FALSE], 2, function(x) {
-    sum(weights * x, na.rm = TRUE)
-  })
+  # Aggregate influence functions with weights
+  agg_if <- rep(0, n_units)
+  for (k in seq_along(post_idx)) {
+    idx <- post_idx[k]
+    if_k <- influence_functions[[idx]]
+    if_k[is.na(if_k)] <- 0
+    agg_if <- agg_if + weights[k] * if_k
+  }
 
+  # Cluster information for bootstrap
+  clusters <- unique(data[[cluster_var]])
+  n_clusters <- length(clusters)
+  cluster_map <- match(data[[cluster_var]], clusters)
+
+  # Aggregate by cluster
+  cluster_inf <- tapply(agg_if, cluster_map, sum, na.rm = TRUE)
+  full_cluster_inf <- rep(0, n_clusters)
+  cluster_ids_present <- as.integer(names(cluster_inf))
+  full_cluster_inf[cluster_ids_present] <- cluster_inf
+
+  # Generate multiplier weights (different seed)
+  set.seed(config$inference$seed + 3)
+  if (config$inference$multiplier_dist == "normal") {
+    xi <- matrix(rnorm(n_clusters * n_bootstrap), n_clusters, n_bootstrap)
+  } else {
+    xi <- matrix(sample(c(-1, 1), n_clusters * n_bootstrap, replace = TRUE),
+                 n_clusters, n_bootstrap)
+  }
+
+  # Bootstrap
+  boot_simple <- numeric(n_bootstrap)
+  for (b in seq_len(n_bootstrap)) {
+    boot_simple[b] <- att_simple + sum(xi[, b] * full_cluster_inf) / n_units
+  }
   se_simple <- sd(boot_simple, na.rm = TRUE)
 
   alpha <- config$inference$alpha
@@ -296,8 +373,8 @@ compute_simple_att <- function(att_results, config) {
     se = se_simple,
     ci_lower = ci[1],
     ci_upper = ci[2],
-    t_stat = att_simple / se_simple,
-    p_value = 2 * pnorm(-abs(att_simple / se_simple)),
+    t_stat = if (se_simple > 0) att_simple / se_simple else NA,
+    p_value = if (se_simple > 0) 2 * pnorm(-abs(att_simple / se_simple)) else NA,
     n_post = length(post_idx)
   )
 }
