@@ -174,21 +174,28 @@ class Config:
         self.outcome_var = f"y_{self.outcome}"
 
 
+def _update_dataclass(obj, updates: dict):
+    """Recursively update a dataclass from a dict."""
+    for key, value in updates.items():
+        if hasattr(obj, key):
+            existing = getattr(obj, key)
+            # If both existing and value are suitable for recursive update
+            if isinstance(value, dict) and hasattr(existing, '__dataclass_fields__'):
+                _update_dataclass(existing, value)
+            else:
+                setattr(obj, key, value)
+
+
 def create_config(**kwargs) -> Config:
     """Create configuration with optional overrides."""
     config = Config()
 
     for key, value in kwargs.items():
         if hasattr(config, key):
-            if isinstance(value, dict) and hasattr(config, key):
-                # Handle nested config updates
-                existing = getattr(config, key)
-                if hasattr(existing, '__dataclass_fields__'):
-                    for k, v in value.items():
-                        if hasattr(existing, k):
-                            setattr(existing, k, v)
-                else:
-                    setattr(config, key, value)
+            existing = getattr(config, key)
+            if isinstance(value, dict) and hasattr(existing, '__dataclass_fields__'):
+                # Recursively update nested dataclass
+                _update_dataclass(existing, value)
             else:
                 setattr(config, key, value)
 
