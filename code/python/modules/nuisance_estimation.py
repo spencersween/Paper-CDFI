@@ -36,6 +36,7 @@ def get_nuisance_gt(cf_results: Dict, g: int, t: int, config: Config) -> Nuisanc
     """Get nuisance estimates for a specific (g,t) pair."""
     gt_pairs = cf_results['gt_pairs']
     data = cf_results['data']
+    id_to_row = cf_results['id_to_row']
 
     # Find gt_index
     gt_row = gt_pairs[(gt_pairs['g'] == g) & (gt_pairs['t'] == t)]
@@ -46,17 +47,23 @@ def get_nuisance_gt(cf_results: Dict, g: int, t: int, config: Config) -> Nuisanc
     is_pre = gt_row['is_pre'].values[0]
     event_time = gt_row['event_time'].values[0]
 
-    # Create estimation sample
+    # Create estimation sample (cross-sectional at time t)
     sample = create_gt_sample(data, g, t, config)
     sample_ids = sample[config.id_var].values
 
-    # Map to data indices
-    data_ids = data[config.id_var].values
-    data_rows = np.array([np.where(data_ids == sid)[0][0] for sid in sample_ids])
+    # Map sample IDs to unit-level row indices
+    unit_rows = np.array([id_to_row.get(sid, -1) for sid in sample_ids])
+    valid_rows = unit_rows >= 0
 
-    # Extract nuisance estimates
-    mu_0 = cf_results['outcome'][data_rows, gt_idx]
-    ps = cf_results['propensity'][data_rows, gt_idx]
+    if not valid_rows.all():
+        n_missing = (~valid_rows).sum()
+        log_message(f"Warning: {n_missing} sample units not found in id_to_row", level="WARNING")
+
+    # Extract nuisance estimates from unit-level storage
+    mu_0 = np.full(len(sample_ids), np.nan)
+    ps = np.full(len(sample_ids), np.nan)
+    mu_0[valid_rows] = cf_results['outcome'][unit_rows[valid_rows], gt_idx]
+    ps[valid_rows] = cf_results['propensity'][unit_rows[valid_rows], gt_idx]
 
     return NuisanceEstimates(
         mu_0=mu_0,

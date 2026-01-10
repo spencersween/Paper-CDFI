@@ -38,24 +38,30 @@ def clustered_bootstrap(att_results: Dict, config: Config) -> Dict:
     Clustered multiplier bootstrap for ATT(g,t) estimates.
 
     Computes bootstrap distribution using cluster-level multiplier weights.
+    Uses UNIT-level influence functions.
     """
     log_message(f"Running clustered multiplier bootstrap ({config.inference.n_bootstrap} replications)...")
 
     data = att_results['data']
     att_df = att_results['att']
     influence_functions = att_results['influence_functions']
+    unit_ids = att_results['unit_ids']
+    n_units = len(unit_ids)
 
     n_gt = len(att_df)
     n_bootstrap = config.inference.n_bootstrap
     cluster_var = config.cluster_var
 
-    # Get cluster information
-    clusters = data[cluster_var].unique()
+    # Get cluster information at UNIT level
+    unit_clusters = data.groupby(config.id_var)[cluster_var].first()
+    clusters = unit_clusters.unique()
     n_clusters = len(clusters)
     cluster_map = pd.Series(range(len(clusters)), index=clusters)
-    cluster_indices = data[cluster_var].map(cluster_map).values
 
-    log_message(f"  Clusters: {n_clusters}")
+    # Map unit IDs to cluster indices
+    cluster_indices = np.array([cluster_map[unit_clusters[uid]] for uid in unit_ids])
+
+    log_message(f"  Units: {n_units}, Clusters: {n_clusters}")
 
     # Generate multiplier weights
     xi = generate_multiplier_weights(
@@ -71,7 +77,7 @@ def clustered_bootstrap(att_results: Dict, config: Config) -> Dict:
     for i in range(n_gt):
         inf_func = influence_functions[i]
 
-        if np.all(np.isnan(inf_func)):
+        if np.all(inf_func == 0):
             continue
 
         # Aggregate by cluster
@@ -83,7 +89,7 @@ def clustered_bootstrap(att_results: Dict, config: Config) -> Dict:
         # Bootstrap
         att_i = att_df.iloc[i]['att']
         for b in range(n_bootstrap):
-            boot_dist[i, b] = att_i + np.sum(xi[:, b] * cluster_inf) / len(data)
+            boot_dist[i, b] = att_i + np.sum(xi[:, b] * cluster_inf) / n_units
 
     # Compute SEs
     boot_se = np.nanstd(boot_dist, axis=1)

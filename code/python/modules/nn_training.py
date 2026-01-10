@@ -7,7 +7,7 @@ Training loop, loss functions, and optimization for multi-task DiD network.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import AdamW, LBFGS
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, ReduceLROnPlateau
 from typing import Dict, List, Tuple, Optional, Callable
 import numpy as np
@@ -30,18 +30,44 @@ class TrainingHistory:
     lr: List[float]
 
 
+def compute_l1_penalty(model: nn.Module) -> torch.Tensor:
+    """Compute L1 penalty (sum of absolute values of parameters)."""
+    l1_penalty = torch.tensor(0.0, device=next(model.parameters()).device)
+    for param in model.parameters():
+        l1_penalty += torch.sum(torch.abs(param))
+    return l1_penalty
+
+
+def compute_l2_penalty(model: nn.Module) -> torch.Tensor:
+    """Compute L2 penalty (sum of squared values of parameters)."""
+    l2_penalty = torch.tensor(0.0, device=next(model.parameters()).device)
+    for param in model.parameters():
+        l2_penalty += torch.sum(param ** 2)
+    return l2_penalty
+
+
 def compute_loss(
     outcome_pred: torch.Tensor,
     propensity_pred: torch.Tensor,
     outcome_target: torch.Tensor,
     treatment_target: torch.Tensor,
-    config: Config
+    config: Config,
+    model: Optional[nn.Module] = None,
+    add_l2_manually: bool = False
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute multi-task loss.
+    Compute multi-task loss with optional regularization.
 
     Combines outcome regression loss (MSE) and propensity score loss (BCE).
     Outcome loss is computed only on control units (D=0).
+
+    Regularization:
+    - L1 penalty: Always added manually if l1_penalty > 0
+    - L2 penalty: For AdamW, handled by optimizer's weight_decay
+                  For L-BFGS, added manually if l2_penalty > 0
+
+    Args:
+        add_l2_manually: If True, add L2 penalty to loss (for L-BFGS)
     """
     # Outcome regression: MSE loss (only on control units)
     control_mask = treatment_target == 0
@@ -65,41 +91,91 @@ def compute_loss(
     total_loss = (config.loss.outcome_weight * outcome_loss +
                   config.loss.propensity_weight * propensity_loss)
 
+    # Add L1 penalty (always manual for both optimizers)
+    l1_loss = torch.tensor(0.0, device=outcome_pred.device)
+    if model is not None and config.loss.l1_penalty > 0:
+        l1_loss = config.loss.l1_penalty * compute_l1_penalty(model)
+        total_loss = total_loss + l1_loss
+
+    # Add L2 penalty (manual only for L-BFGS; AdamW uses weight_decay)
+    l2_loss = torch.tensor(0.0, device=outcome_pred.device)
+    if model is not None and add_l2_manually and config.loss.l2_penalty > 0:
+        l2_loss = config.loss.l2_penalty * compute_l2_penalty(model)
+        total_loss = total_loss + l2_loss
+
     return {
         'total': total_loss,
         'outcome': outcome_loss,
-        'propensity': propensity_loss
+        'propensity': propensity_loss,
+        'l1': l1_loss,
+        'l2': l2_loss
     }
 
 
-def create_optimizer(model: nn.Module, config: Config):
-    """Create optimizer."""
-    params = model.parameters()
+def create_optimizer(model: nn.Module, config: Config) -> Tuple:
+    """
+    Create optimizer.
+
+    Returns:
+        Tuple of (optimizer, add_l2_manually)
+        - add_l2_manually: True if L2 penalty should be added to loss manually
+                          (for L-BFGS), False if handled by optimizer (for AdamW)
+    """
+    params = list(model.parameters())
 
     if config.optimizer == "adamw":
         opt_config = config.optimizer_params.get('adamw', {})
         if hasattr(opt_config, 'lr'):
             # It's a dataclass
+            # Use l2_penalty as weight_decay if specified, otherwise use config's weight_decay
+            weight_decay = config.loss.l2_penalty if config.loss.l2_penalty > 0 else opt_config.weight_decay
             optimizer = AdamW(
                 params,
                 lr=opt_config.lr,
-                weight_decay=opt_config.weight_decay,
+                weight_decay=weight_decay,
                 betas=opt_config.betas,
                 eps=opt_config.eps
             )
         else:
             # It's a dict
+            weight_decay = config.loss.l2_penalty if config.loss.l2_penalty > 0 else opt_config.get('weight_decay', 0.01)
             optimizer = AdamW(
                 params,
                 lr=opt_config.get('lr', 0.001),
-                weight_decay=opt_config.get('weight_decay', 0.01),
+                weight_decay=weight_decay,
                 betas=opt_config.get('betas', (0.9, 0.999)),
                 eps=opt_config.get('eps', 1e-8)
             )
+        # AdamW handles L2 via weight_decay, so don't add manually
+        add_l2_manually = False
+
+    elif config.optimizer == "lbfgs":
+        opt_config = config.optimizer_params.get('lbfgs', {})
+        if hasattr(opt_config, 'lr'):
+            # It's a dataclass
+            optimizer = LBFGS(
+                params,
+                lr=opt_config.lr,
+                max_iter=opt_config.max_iter,
+                history_size=opt_config.history_size,
+                line_search_fn=opt_config.line_search_fn
+            )
+        else:
+            # It's a dict
+            optimizer = LBFGS(
+                params,
+                lr=opt_config.get('lr', 1.0),
+                max_iter=opt_config.get('max_iter', 20),
+                history_size=opt_config.get('history_size', 100),
+                line_search_fn=opt_config.get('line_search_fn', 'strong_wolfe')
+            )
+        # L-BFGS doesn't have weight_decay, so add L2 manually
+        add_l2_manually = True
+
     else:
         raise ValueError(f"Unknown optimizer: {config.optimizer}")
 
-    return optimizer
+    return optimizer, add_l2_manually
 
 
 def create_scheduler(optimizer, config: Config):
@@ -158,7 +234,8 @@ def train_epoch(
     dataloader_fn: Callable,
     optimizer,
     config: Config,
-    device: torch.device
+    device: torch.device,
+    add_l2_manually: bool = False
 ) -> Dict[str, float]:
     """Training step for one epoch."""
     model.train()
@@ -182,13 +259,15 @@ def train_epoch(
         # Forward pass
         output = model.forward_gt(x, gt_idx)
 
-        # Compute loss
+        # Compute loss (with regularization)
         losses = compute_loss(
             output['outcome'],
             output['propensity'],
             delta_y,
             D,
-            config
+            config,
+            model=model,
+            add_l2_manually=add_l2_manually
         )
 
         # Backward pass
@@ -221,7 +300,8 @@ def validate_epoch(
     model: nn.Module,
     dataloader_fn: Callable,
     config: Config,
-    device: torch.device
+    device: torch.device,
+    add_l2_manually: bool = False
 ) -> Dict[str, float]:
     """Validation step."""
     model.eval()
@@ -242,12 +322,15 @@ def validate_epoch(
 
         output = model.forward_gt(x, gt_idx)
 
+        # Compute loss (with regularization for consistent metrics)
         losses = compute_loss(
             output['outcome'],
             output['propensity'],
             delta_y,
             D,
-            config
+            config,
+            model=model,
+            add_l2_manually=add_l2_manually
         )
 
         total_loss += losses['total'].item() * batch_size
@@ -279,7 +362,7 @@ def train_model(
     device = get_device(config)
     model = model.to(device)
 
-    optimizer = create_optimizer(model, config)
+    optimizer, add_l2_manually = create_optimizer(model, config)
     scheduler = create_scheduler(optimizer, config)
 
     # Early stopping
@@ -306,10 +389,10 @@ def train_model(
 
     for epoch in range(1, config.training.epochs + 1):
         # Train
-        train_metrics = train_epoch(model, train_loader, optimizer, config, device)
+        train_metrics = train_epoch(model, train_loader, optimizer, config, device, add_l2_manually)
 
         # Validate
-        val_metrics = validate_epoch(model, val_loader, config, device)
+        val_metrics = validate_epoch(model, val_loader, config, device, add_l2_manually)
 
         # Record history
         history.train_loss.append(train_metrics['loss'])

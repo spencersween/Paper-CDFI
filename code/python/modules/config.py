@@ -56,9 +56,18 @@ class TrainingConfig:
 class AdamWConfig:
     """AdamW optimizer configuration."""
     lr: float = 0.001
-    weight_decay: float = 0.01
+    weight_decay: float = 0.01  # L2 regularization (handled by optimizer)
     betas: tuple = (0.9, 0.999)
     eps: float = 1e-8
+
+
+@dataclass
+class LBFGSConfig:
+    """L-BFGS optimizer configuration."""
+    lr: float = 1.0
+    max_iter: int = 20
+    history_size: int = 100
+    line_search_fn: str = "strong_wolfe"
 
 
 @dataclass
@@ -83,19 +92,13 @@ class CrossFittingConfig:
 
 
 @dataclass
-class PropensityConfig:
-    """Propensity score configuration."""
-    min_ps: float = 0.001
-    max_ps: float = 0.999
-
-
-@dataclass
 class InferenceConfig:
     """Inference configuration."""
     n_bootstrap: int = 1000
     alpha: float = 0.05
-    multiplier_dist: str = "normal"
+    multiplier_dist: str = "normal"  # "normal" or "rademacher"
     uniform_bands: bool = True
+    pointwise_ci: bool = True
     seed: int = 123
 
 
@@ -106,6 +109,17 @@ class EventStudyConfig:
     post_periods: int = 10
     reference_period: int = -1
     weight_by_group_size: bool = True
+    drop_first_period: bool = True
+    drop_last_period: bool = True
+
+
+@dataclass
+class PropensityConfig:
+    """Propensity score configuration."""
+    min_ps: float = 0.001
+    max_ps: float = 0.999
+    trim: bool = False
+    trim_threshold: float = 0.01
 
 
 @dataclass
@@ -113,6 +127,11 @@ class LossConfig:
     """Loss function configuration."""
     outcome_weight: float = 1.0
     propensity_weight: float = 1.0
+    # Regularization penalties (applied manually to loss)
+    # For AdamW: L1 applied manually, L2 via optimizer's weight_decay
+    # For L-BFGS: Both L1 and L2 applied manually
+    l1_penalty: float = 0.0
+    l2_penalty: float = 0.0
 
 
 @dataclass
@@ -160,8 +179,11 @@ class Config:
     # Sub-configurations
     architecture: ArchitectureConfig = field(default_factory=ArchitectureConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
-    optimizer: str = "adamw"
-    optimizer_params: Dict[str, Any] = field(default_factory=lambda: {"adamw": AdamWConfig()})
+    optimizer: str = "adamw"  # "adamw" or "lbfgs"
+    optimizer_params: Dict[str, Any] = field(default_factory=lambda: {
+        "adamw": AdamWConfig(),
+        "lbfgs": LBFGSConfig()
+    })
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     cross_fitting: CrossFittingConfig = field(default_factory=CrossFittingConfig)
     propensity: PropensityConfig = field(default_factory=PropensityConfig)

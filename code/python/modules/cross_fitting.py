@@ -243,23 +243,32 @@ def compute_oof_predictions(
     val_data: pd.DataFrame,
     gt_pairs: pd.DataFrame,
     covariate_info: CovariateInfo,
+    unit_ids: np.ndarray,
+    id_to_row: Dict,
     config: Config
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute out-of-fold predictions for held-out data."""
+    """
+    Compute out-of-fold predictions for held-out data.
+
+    Predictions are stored at the UNIT level (wide format):
+    - Shape: (n_units, n_gt)
+    - Each unit has one prediction per (g,t) pair they belong to
+    """
     device = get_device(config)
     model.eval()
 
-    n_val = len(val_data)
+    n_units = len(unit_ids)
     n_gt = len(gt_pairs)
 
-    outcome_preds = np.full((n_val, n_gt), np.nan)
-    propensity_preds = np.full((n_val, n_gt), np.nan)
+    outcome_preds = np.full((n_units, n_gt), np.nan)
+    propensity_preds = np.full((n_units, n_gt), np.nan)
 
     with torch.no_grad():
         for _, row in gt_pairs.iterrows():
             g, t = row['g'], row['t']
             gt_idx = row['gt_index']
 
+            # Create cross-sectional sample for this (g,t)
             sample = create_gt_sample(val_data, g, t, config)
 
             if len(sample) > 0:
@@ -268,15 +277,13 @@ def compute_oof_predictions(
 
                 preds = model.predict_gt(X_tensor, gt_idx)
 
-                # Map back to validation indices
-                val_ids = val_data[config.id_var].values
+                # Map predictions back to unit-level storage
                 sample_ids = sample[config.id_var].values
-
                 for j, sid in enumerate(sample_ids):
-                    val_row = np.where(val_ids == sid)[0]
-                    if len(val_row) > 0:
-                        outcome_preds[val_row[0], gt_idx] = preds['outcome'][j, 0].cpu().numpy()
-                        propensity_preds[val_row[0], gt_idx] = preds['propensity'][j, 0].cpu().numpy()
+                    if sid in id_to_row:
+                        unit_row = id_to_row[sid]
+                        outcome_preds[unit_row, gt_idx] = preds['outcome'][j, 0].cpu().numpy()
+                        propensity_preds[unit_row, gt_idx] = preds['propensity'][j, 0].cpu().numpy()
 
     return outcome_preds, propensity_preds
 
@@ -291,7 +298,9 @@ def run_cross_fitting(
     """
     Run full cross-fitting procedure.
 
-    Returns dict with out-of-fold predictions for all observations.
+    Returns dict with out-of-fold predictions at the UNIT level (wide format).
+    - outcome: (n_units, n_gt) array
+    - propensity: (n_units, n_gt) array
     """
     n_folds = config.cross_fitting.n_folds
     device = get_device(config)
@@ -305,12 +314,18 @@ def run_cross_fitting(
     cluster_folds = assign_cluster_folds(data, config)
     data = add_fold_column(data, cluster_folds, config)
 
-    # Initialize storage
-    n_obs = len(data)
-    n_gt = len(gt_pairs)
+    # Get unique units and create ID mapping
+    unit_ids = data[config.id_var].unique()
+    n_units = len(unit_ids)
+    id_to_row = {uid: idx for idx, uid in enumerate(unit_ids)}
 
-    oof_outcome = np.full((n_obs, n_gt), np.nan)
-    oof_propensity = np.full((n_obs, n_gt), np.nan)
+    # Initialize UNIT-level storage (wide format)
+    n_gt = len(gt_pairs)
+    oof_outcome = np.full((n_units, n_gt), np.nan)
+    oof_propensity = np.full((n_units, n_gt), np.nan)
+
+    # Track which units are in validation for each fold
+    unit_folds = data.groupby(config.id_var)['fold'].first().to_dict()
 
     fold_models = []
 
@@ -318,9 +333,13 @@ def run_cross_fitting(
     for fold in range(1, n_folds + 1):
         log_message(f"\n=== Fold {fold}/{n_folds} ===")
 
-        # Get fold indices
+        # Get fold indices (observation level for training data prep)
         val_idx = data['fold'] == fold
         train_folds = [f for f in range(1, n_folds + 1) if f != fold]
+
+        # Get validation unit IDs
+        val_unit_ids = [uid for uid, f in unit_folds.items() if f == fold]
+        val_unit_rows = [id_to_row[uid] for uid in val_unit_ids]
 
         # Prepare training data
         train_combined = prepare_combined_training_data(
@@ -340,17 +359,18 @@ def run_cross_fitting(
         model, history, training_time = train_model(model, loaders['train'], loaders['val'], config)
         fold_models.append(model)
 
-        # Get out-of-fold predictions
+        # Get out-of-fold predictions (unit level)
         log_message("Computing out-of-fold predictions...")
 
         val_data = data[val_idx].copy()
         outcome_preds, propensity_preds = compute_oof_predictions(
-            model, val_data, gt_pairs, covariate_info, config
+            model, val_data, gt_pairs, covariate_info, unit_ids, id_to_row, config
         )
 
-        # Store predictions
-        oof_outcome[val_idx.values] = outcome_preds
-        oof_propensity[val_idx.values] = propensity_preds
+        # Store predictions for validation units only
+        for unit_row in val_unit_rows:
+            oof_outcome[unit_row, :] = outcome_preds[unit_row, :]
+            oof_propensity[unit_row, :] = propensity_preds[unit_row, :]
 
         # Clean up
         gc.collect()
@@ -365,6 +385,8 @@ def run_cross_fitting(
     return {
         'outcome': oof_outcome,
         'propensity': oof_propensity,
+        'unit_ids': unit_ids,
+        'id_to_row': id_to_row,
         'data': data,
         'gt_pairs': gt_pairs,
         'covariate_info': covariate_info,
@@ -377,20 +399,34 @@ def validate_cross_fitting(cf_results: Dict, config: Config) -> bool:
     """Validate cross-fitting results."""
     outcome = cf_results['outcome']
     propensity = cf_results['propensity']
+    gt_pairs = cf_results['gt_pairs']
+    unit_ids = cf_results['unit_ids']
 
-    n_missing_outcome = np.isnan(outcome).sum()
-    n_missing_propensity = np.isnan(propensity).sum()
+    n_units, n_gt = outcome.shape
 
-    if n_missing_outcome > 0:
-        log_message(f"Warning: {n_missing_outcome} missing outcome predictions "
-                    f"({100 * n_missing_outcome / outcome.size:.1f}%)", level="WARNING")
+    # Count non-missing predictions per (g,t)
+    n_filled_per_gt = np.sum(~np.isnan(outcome), axis=0)
+    total_filled = n_filled_per_gt.sum()
+    fill_rate = 100 * total_filled / outcome.size
 
-    if n_missing_propensity > 0:
-        log_message(f"Warning: {n_missing_propensity} missing propensity predictions "
-                    f"({100 * n_missing_propensity / propensity.size:.1f}%)", level="WARNING")
+    log_message(f"Prediction matrix: {n_units} units x {n_gt} (g,t) pairs")
+    log_message(f"  Filled cells: {total_filled:,} ({fill_rate:.1f}%)")
+    log_message(f"  Predictions per (g,t): min={n_filled_per_gt.min()}, max={n_filled_per_gt.max()}, "
+                f"mean={n_filled_per_gt.mean():.0f}")
 
+    # Validate propensity scores
     ps_min = np.nanmin(propensity)
     ps_max = np.nanmax(propensity)
     log_message(f"Propensity score range: [{ps_min:.4f}, {ps_max:.4f}]")
+
+    # Check that we have predictions for each (g,t)
+    n_empty_gt = (n_filled_per_gt == 0).sum()
+    if n_empty_gt > 0:
+        log_message(f"Warning: {n_empty_gt} (g,t) pairs have no predictions", level="WARNING")
+
+    # Validate outcome predictions
+    outcome_min = np.nanmin(outcome)
+    outcome_max = np.nanmax(outcome)
+    log_message(f"Outcome prediction range: [{outcome_min:.4f}, {outcome_max:.4f}]")
 
     return True

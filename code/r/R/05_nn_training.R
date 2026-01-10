@@ -3,19 +3,54 @@
 #' Training loop, loss functions, and optimization for multi-task DiD network.
 #' Supports per-(g,t) input projection architecture.
 
-#' Compute multi-task loss
+
+#' Compute L1 penalty (sum of absolute values of parameters)
+#'
+#' @param model torch nn_module
+#' @return Tensor. L1 penalty value
+compute_l1_penalty <- function(model) {
+  l1_penalty <- torch::torch_tensor(0, device = model$parameters[[1]]$device)
+  for (param in model$parameters) {
+    l1_penalty <- l1_penalty + torch::torch_sum(torch::torch_abs(param))
+  }
+  l1_penalty
+}
+
+
+#' Compute L2 penalty (sum of squared values of parameters)
+#'
+#' @param model torch nn_module
+#' @return Tensor. L2 penalty value
+compute_l2_penalty <- function(model) {
+  l2_penalty <- torch::torch_tensor(0, device = model$parameters[[1]]$device)
+  for (param in model$parameters) {
+    l2_penalty <- l2_penalty + torch::torch_sum(param^2)
+  }
+  l2_penalty
+}
+
+
+#' Compute multi-task loss with optional regularization
 #'
 #' Combines outcome regression loss (MSE) and propensity score loss (BCE).
 #' Outcome loss is computed only on control units (D=0).
+#'
+#' Regularization:
+#' - L1 penalty: Always added manually if l1_penalty > 0
+#' - L2 penalty: For AdamW, handled by optimizer's weight_decay
+#'               For L-BFGS, added manually if l2_penalty > 0
 #'
 #' @param outcome_pred Tensor. Predicted outcome regression values
 #' @param propensity_pred Tensor. Predicted propensity scores
 #' @param outcome_target Tensor. True outcome differences
 #' @param treatment_target Tensor. True treatment indicators (0/1)
 #' @param config Configuration object
+#' @param model torch nn_module (optional, for regularization)
+#' @param add_l2_manually Logical. If TRUE, add L2 penalty to loss (for L-BFGS)
 #' @return List with total loss and component losses
 compute_loss <- function(outcome_pred, propensity_pred,
-                         outcome_target, treatment_target, config) {
+                         outcome_target, treatment_target, config,
+                         model = NULL, add_l2_manually = FALSE) {
 
   # Outcome regression: MSE loss (only on control units for training)
   # We train to predict E[DeltaY | X, D=0]
@@ -41,10 +76,26 @@ compute_loss <- function(outcome_pred, propensity_pred,
   total_loss <- (config$loss$outcome_weight * outcome_loss +
                  config$loss$propensity_weight * propensity_loss)
 
+  # Add L1 penalty (always manual for both optimizers)
+  l1_loss <- torch::torch_tensor(0, device = outcome_pred$device)
+  if (!is.null(model) && config$loss$l1_penalty > 0) {
+    l1_loss <- config$loss$l1_penalty * compute_l1_penalty(model)
+    total_loss <- total_loss + l1_loss
+  }
+
+  # Add L2 penalty (manual only for L-BFGS; AdamW uses weight_decay)
+  l2_loss <- torch::torch_tensor(0, device = outcome_pred$device)
+  if (!is.null(model) && add_l2_manually && config$loss$l2_penalty > 0) {
+    l2_loss <- config$loss$l2_penalty * compute_l2_penalty(model)
+    total_loss <- total_loss + l2_loss
+  }
+
   list(
     total = total_loss,
     outcome = outcome_loss,
-    propensity = propensity_loss
+    propensity = propensity_loss,
+    l1 = l1_loss,
+    l2 = l2_loss
   )
 }
 

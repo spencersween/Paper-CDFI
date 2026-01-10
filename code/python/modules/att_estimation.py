@@ -14,55 +14,64 @@ from .config import Config
 from .nuisance_estimation import get_nuisance_gt, NuisanceEstimates
 
 
-def compute_att_gt(nuisance: NuisanceEstimates, config: Config) -> Dict:
+def compute_att_gt(
+    nuisance: NuisanceEstimates,
+    n_units: int,
+    id_to_row: Dict,
+    config: Config
+) -> Dict:
     """
     Compute doubly-robust ATT(g,t) estimate.
 
     Uses the influence function approach from CS2021:
     ATT(g,t) = E[w1 * (DeltaY - mu_0)] - E[w0 * (DeltaY - mu_0)]
+
+    Returns influence function at UNIT level (n_units,) for proper aggregation.
     """
     delta_y = nuisance.delta_y
     mu_0 = nuisance.mu_0
     ps = nuisance.ps
     D = nuisance.D
-    n = nuisance.n
+    sample_ids = nuisance.ids
+    n_sample = nuisance.n
 
     # Handle missing values
     valid_idx = ~np.isnan(delta_y) & ~np.isnan(mu_0) & ~np.isnan(ps)
-    if valid_idx.sum() < n * 0.5:
+    if valid_idx.sum() < n_sample * 0.5:
         log_message(f"Warning: More than 50% missing values for (g={nuisance.g}, t={nuisance.t})", level="WARNING")
 
-    delta_y = delta_y[valid_idx]
-    mu_0 = mu_0[valid_idx]
-    ps = ps[valid_idx]
-    D = D[valid_idx]
+    delta_y_valid = delta_y[valid_idx]
+    mu_0_valid = mu_0[valid_idx]
+    ps_valid = ps[valid_idx]
+    D_valid = D[valid_idx]
+    sample_ids_valid = sample_ids[valid_idx]
     n_valid = valid_idx.sum()
 
     # Clamp propensity scores
-    ps = clamp(ps, config.propensity.min_ps, config.propensity.max_ps)
+    ps_valid = clamp(ps_valid, config.propensity.min_ps, config.propensity.max_ps)
 
     # Probability of being in treated group
-    p_g = D.mean()
+    p_g = D_valid.mean() if n_valid > 0 else 0
 
-    if p_g == 0 or p_g == 1:
+    if p_g == 0 or p_g == 1 or n_valid == 0:
         log_message(f"Warning: Degenerate treatment probability for (g={nuisance.g}, t={nuisance.t}): p_g = {p_g:.4f}", level="WARNING")
         return {
             'att': np.nan,
             'se': np.nan,
-            'influence_function': np.full(n, np.nan),
+            'influence_function': np.zeros(n_units),  # Zero IF for units not in sample
             'n_valid': n_valid,
             'p_g': p_g
         }
 
     # Residuals
-    residual = delta_y - mu_0
+    residual = delta_y_valid - mu_0_valid
 
     # Weights
-    w1 = D / p_g
-    w0 = (1 - D) * ps / ((1 - ps) * p_g)
+    w1 = D_valid / p_g
+    w0 = (1 - D_valid) * ps_valid / ((1 - ps_valid) * p_g)
 
     # Normalize control weights
-    n_control = (1 - D).sum()
+    n_control = (1 - D_valid).sum()
     if n_control > 0:
         w0_sum = w0.sum()
         if w0_sum > 0:
@@ -71,12 +80,14 @@ def compute_att_gt(nuisance: NuisanceEstimates, config: Config) -> Dict:
     # ATT estimate (doubly-robust)
     att = (w1 * residual).mean() - (w0 * residual).mean()
 
-    # Influence function
-    inf_func_valid = (D / p_g) * (residual - att) - ((1 - D) * ps / ((1 - ps) * p_g)) * residual
+    # Influence function for valid sample units
+    inf_func_valid = (D_valid / p_g) * (residual - att) - ((1 - D_valid) * ps_valid / ((1 - ps_valid) * p_g)) * residual
 
-    # Expand to full sample
-    inf_func = np.full(n, np.nan)
-    inf_func[valid_idx] = inf_func_valid
+    # Expand to UNIT level (n_units,) - zeros for units not in sample
+    inf_func = np.zeros(n_units)
+    for j, sid in enumerate(sample_ids_valid):
+        if sid in id_to_row:
+            inf_func[id_to_row[sid]] = inf_func_valid[j]
 
     # Standard error
     se = np.sqrt((inf_func_valid ** 2).mean() / n_valid)
@@ -86,7 +97,7 @@ def compute_att_gt(nuisance: NuisanceEstimates, config: Config) -> Dict:
         'se': se,
         'influence_function': inf_func,
         'n_valid': n_valid,
-        'n_treated': int(D.sum()),
+        'n_treated': int(D_valid.sum()),
         'n_control': int(n_control),
         'p_g': p_g,
         'g': nuisance.g,
@@ -97,10 +108,13 @@ def compute_att_gt(nuisance: NuisanceEstimates, config: Config) -> Dict:
 
 
 def compute_all_att(cf_results: Dict, config: Config) -> Dict:
-    """Compute all ATT(g,t) estimates."""
+    """Compute all ATT(g,t) estimates with unit-level influence functions."""
     log_message("Computing ATT(g,t) estimates...")
 
     gt_pairs = cf_results['gt_pairs']
+    unit_ids = cf_results['unit_ids']
+    id_to_row = cf_results['id_to_row']
+    n_units = len(unit_ids)
     n_gt = len(gt_pairs)
 
     att_results = []
@@ -110,7 +124,7 @@ def compute_all_att(cf_results: Dict, config: Config) -> Dict:
         g, t = row['g'], row['t']
 
         nuisance = get_nuisance_gt(cf_results, g, t, config)
-        att_result = compute_att_gt(nuisance, config)
+        att_result = compute_att_gt(nuisance, n_units, id_to_row, config)
 
         att_results.append({
             'g': g,
@@ -145,6 +159,8 @@ def compute_all_att(cf_results: Dict, config: Config) -> Dict:
     return {
         'att': att_df,
         'influence_functions': influence_functions,
+        'unit_ids': unit_ids,
+        'id_to_row': id_to_row,
         'data': cf_results['data'],
         'config': config
     }

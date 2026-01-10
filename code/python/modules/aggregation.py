@@ -28,13 +28,13 @@ def aggregate_influence_functions(
         IF_e = sum_j(w_j * IF_j) for all (g,t) pairs with event_time = e
 
     Returns:
-        Aggregated influence functions: (n_events, n_obs) array
+        Aggregated influence functions: (n_events, n_units) array
     """
     influence_functions = att_results['influence_functions']
-    n_obs = influence_functions[0].shape[0] if len(influence_functions) > 0 else 0
+    n_units = influence_functions[0].shape[0] if len(influence_functions) > 0 else 0
     n_events = len(event_times)
 
-    agg_if = np.zeros((n_events, n_obs))
+    agg_if = np.zeros((n_events, n_units))
 
     for i, e in enumerate(event_times):
         if e not in weights_by_event:
@@ -62,6 +62,9 @@ def compute_clustered_se_and_bootstrap(
     """
     Compute clustered SEs and bootstrap distribution from aggregated influence functions.
 
+    Args:
+        agg_influence_functions: (n_events, n_units) array of aggregated IFs
+
     Returns:
         (se, bootstrap_dist) tuple
     """
@@ -69,7 +72,7 @@ def compute_clustered_se_and_bootstrap(
         np.random.seed(seed)
 
     n_events = agg_influence_functions.shape[0]
-    n_obs = agg_influence_functions.shape[1]
+    n_units = agg_influence_functions.shape[1]
 
     # Aggregate influence functions by cluster
     cluster_if = np.zeros((n_events, n_clusters))
@@ -93,7 +96,7 @@ def compute_clustered_se_and_bootstrap(
     boot_dist = np.zeros((n_events, n_bootstrap))
     for e in range(n_events):
         for b in range(n_bootstrap):
-            boot_dist[e, b] = att_vals[e] + np.sum(xi[:, b] * cluster_if[e, :]) / n_obs
+            boot_dist[e, b] = att_vals[e] + np.sum(xi[:, b] * cluster_if[e, :]) / n_units
 
     # Standard errors from bootstrap
     se = np.nanstd(boot_dist, axis=1)
@@ -205,12 +208,20 @@ def aggregate_event_study(att_results: Dict, config: Config) -> Dict:
         att_results, event_times, weights_by_event, indices_by_event
     )
 
-    # Get cluster information
+    # Get cluster information at UNIT level
+    # Each unit belongs to one cluster
     cluster_var = config.cluster_var
-    clusters = data[cluster_var].unique()
+    unit_ids = att_results['unit_ids']
+    id_to_row = att_results['id_to_row']
+
+    # Get cluster for each unit (use first observation per unit)
+    unit_clusters = data.groupby(config.id_var)[cluster_var].first()
+    clusters = unit_clusters.unique()
     n_clusters = len(clusters)
     cluster_map = pd.Series(range(len(clusters)), index=clusters)
-    cluster_indices = data[cluster_var].map(cluster_map).values
+
+    # Map unit IDs to cluster indices
+    cluster_indices = np.array([cluster_map[unit_clusters[uid]] for uid in unit_ids])
 
     log_message(f"  Computing clustered bootstrap ({config.inference.n_bootstrap} reps, {n_clusters} clusters)...")
 
