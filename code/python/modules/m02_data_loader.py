@@ -263,7 +263,8 @@ def create_sample_masks(unit_data: UnitData, gt_info: GTInfo, config: Config) ->
         treated_mask = (groups == g)
 
         # Control: units not-yet-treated at t (group > t) or never-treated (group = 0)
-        control_mask = (groups > t) | (groups == never_treated)
+        # IMPORTANT: Exclude the treated group from controls to avoid overlap
+        control_mask = ((groups > t) | (groups == never_treated)) & ~treated_mask
 
         # Sample is treated + control
         in_sample = treated_mask | control_mask
