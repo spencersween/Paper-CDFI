@@ -172,14 +172,24 @@ def run_cross_fitting(
             unit_indices=train_indices
         )
 
-        # Split training into train/val for early stopping
-        n_train = len(train_indices)
-        n_internal_val = int(n_train * config.training.validation_split)
-        np.random.seed(config.cross_fitting.seed + fold)
-        perm = np.random.permutation(n_train)
+        # Split training into train/val for early stopping BY CLUSTER
+        # (not by unit, to avoid leakage within clusters)
+        # Random each fold - no fixed seed
+        train_clusters = unit_data.clusters[train_indices]
+        unique_train_clusters = np.unique(train_clusters)
+        n_train_clusters = len(unique_train_clusters)
+        n_internal_val_clusters = max(1, int(n_train_clusters * config.training.validation_split))
 
-        internal_train_indices = train_indices[perm[n_internal_val:]]
-        internal_val_indices = train_indices[perm[:n_internal_val]]
+        perm_clusters = np.random.permutation(n_train_clusters)
+        internal_val_cluster_set = set(unique_train_clusters[perm_clusters[:n_internal_val_clusters]])
+
+        # Map back to unit indices
+        internal_val_mask = np.array([c in internal_val_cluster_set for c in train_clusters])
+        internal_train_indices = train_indices[~internal_val_mask]
+        internal_val_indices = train_indices[internal_val_mask]
+
+        log_message(f"  Internal split: {len(internal_train_indices)} train, {len(internal_val_indices)} val "
+                   f"({n_train_clusters - n_internal_val_clusters}/{n_internal_val_clusters} clusters)")
 
         internal_train_dataset = DiDDataset(
             X_full=unit_data.X_full,
